@@ -18,13 +18,13 @@ not aspiration.
 
 ## Phase 1 — Domain contracts and RunManager lifecycle
 
-- TODO — Define Pydantic contracts for configuration, modes, IDs, run state,
+- DONE — Define Pydantic contracts for configuration, modes, IDs, run state,
   budgets, errors, artifacts, and trace events.
-- TODO — Decide and document the legal run-state transition table.
-- TODO — Define `RunStore`, `Clock`, and trace sink interfaces.
-- TODO — Implement and test an in-memory store and atomic filesystem store.
-- TODO — Implement run create/load/transition/finalize/resume orchestration.
-- TODO — Add offline tests for invalid transitions, corruption, redaction, and
+- DONE — Decide and document the legal run-state transition table.
+- DONE — Define `RunStore`, `Clock`, and trace sink interfaces.
+- DONE — Implement and test an in-memory store and atomic filesystem store.
+- DONE — Implement run create/load/transition/finalize/resume orchestration.
+- DONE — Add offline tests for invalid transitions, corruption, redaction, and
   real-mode configuration failure.
 
 ## Phase 2 — Planner and validated task DAG
