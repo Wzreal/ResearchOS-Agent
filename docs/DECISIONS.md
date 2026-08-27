@@ -164,3 +164,29 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   input hashes are safe and reproducible, and adapter bugs cannot silently
   transform domain data. Phase 4 must add adapter-specific real-mode validation
   through a superseding or additional ADR.
+
+## ADR-0012: Expose uncertain create outcomes and validate trace ownership
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** A create operation can fail after `run_state.json` becomes
+  visible, leaving a durable run whose identifier must not be lost. A valid
+  trace schema alone also does not prove that an event belongs to the run
+  directory from which it was read or that the event was safely redacted.
+- **Decision:** Every `StatePersistenceError` carries the affected `run_id`.
+  Its `state_replaced` field means `os.replace` returned successfully and the
+  new snapshot was observable before a later write or durability step failed;
+  callers must therefore treat the state as possibly durable and inspect it by
+  that run ID. `state_replaced=false` means replacement did not occur.
+  Every `TraceCommitError` carries `run_id`, transition ID, and revision, while
+  `state_committed=true` means RunStore returned successfully before the
+  committed trace append failed or could not be confirmed. It does not assert
+  that the committed event is absent, because a failure during append may have
+  occurred after bytes reached the file. Filesystem trace reads validate every
+  event's run ID against the requested run and reject persisted events that
+  still require redaction. The unused `run.resume_rejected` event contract is
+  removed rather than implying unimplemented emission behavior.
+- **Consequences:** Callers can always locate and reconcile a possibly created
+  run without changing the intent-state-committed protocol. Cross-run trace
+  contamination and unsafe persisted trace data fail as corruption rather than
+  being accepted or silently rewritten.

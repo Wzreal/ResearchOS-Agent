@@ -42,8 +42,11 @@ class UnsafePersistenceData(ResearchOSError):
 
 
 class StatePersistenceError(ResearchOSError):
-    def __init__(self, message: str, *, state_replaced: bool) -> None:
+    def __init__(
+        self, message: str, *, run_id: str, state_replaced: bool
+    ) -> None:
         super().__init__(message)
+        self.run_id = run_id
         self.state_replaced = state_replaced
 
 
@@ -52,11 +55,12 @@ class TraceCommitError(ResearchOSError):
         self,
         message: str,
         *,
+        run_id: str,
         transition_id: str,
         revision: int,
-        state_committed: bool,
     ) -> None:
         super().__init__(message)
+        self.run_id = run_id
         self.transition_id = transition_id
         self.revision = revision
-        self.state_committed = state_committed
+        self.state_committed = True
