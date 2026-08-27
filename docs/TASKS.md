@@ -31,10 +31,10 @@ not aspiration.
 
 ## Phase 2 — Planner and validated task DAG
 
-- TODO — Define perspective, task, dependency, policy, and DAG contracts.
-- TODO — Implement DAG structural and policy validation.
-- TODO — Define planner/model interfaces plus deterministic mock fixtures.
-- TODO — Trace planning and bounded replan decisions.
+- DONE — Define perspective, task, dependency, policy, and DAG contracts.
+- DONE — Implement DAG structural and policy validation.
+- DONE — Define planner/model interfaces plus deterministic mock fixtures.
+- DONE — Trace planning and bounded replan decisions.
 
 ## Phase 3 — Durable asynchronous DAG runtime
 
