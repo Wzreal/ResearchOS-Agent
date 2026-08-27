@@ -280,3 +280,132 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   adding persistence. Diagnostic detail is intentionally less verbose to
   guarantee that malformed free text is not retained. Durable plan provenance,
   persistence, and recovery remain Phase 3 work.
+
+## ADR-0016: Use a deterministic single-writer asynchronous DAG runtime
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Phase 3 must execute a validated DAG concurrently while keeping
+  scheduling decisions, dependency propagation, retries, and cancellation
+  deterministic and recoverable without introducing Phase 4 agents or tools.
+- **Decision:** A single asyncio coordinator is the only runtime-state writer.
+  Ready tasks are ordered by descending priority, validated topological index,
+  and task ID. `ALL_SUCCESS_REQUIRED` is the only dependency policy; root
+  failure IDs propagate through blocked descendants and independent branches
+  continue. Attempts use explicit retry schedules without jitter, fixed
+  timeouts, and a run-level cancellation controller that supplies read-only
+  per-attempt signals. Already dispatched non-cooperative work is allowed until
+  its original timeout. `ExecutorStatus.COMPLETED` means all tasks are terminal
+  and no work is runnable, not that every task succeeded. Run terminal-status
+  mapping remains outside the executor.
+- **Consequences:** Offline behavior and trace order are reproducible and no
+  multiprocess lock or scheduler dependency is required. Phase 3 supports one
+  executor writer per run; distributed leases, provider interruption, and run
+  lifecycle finalization are deferred.
+
+## ADR-0017: Use atomic checkpoints with a one-mutation immutable trace outbox
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** A checkpoint snapshot and append-only trace cannot be one
+  filesystem transaction. Recovery must not regenerate timestamps or semantic
+  event content after a crash, and the solution must remain smaller than a WAL.
+- **Decision:** Checkpoints persist the full DAG/policy snapshots and hashes,
+  run identity/revision, runtime states, outcomes, budget, replan accounting,
+  and one `last_mutation` outbox. Every outbox entry is a complete immutable
+  `TraceEvent` descriptor containing event ID/type, original timestamp,
+  run/revision, correlation/causation, all other event fields, sanitized
+  attributes, and its canonical event hash. Revision `N` commits as:
+  checkpoint intent and fsync; same-directory temp write, temp fsync, atomic
+  replace, and parent fsync; exact outbox event appends; checkpoint committed
+  and fsync. A new mutation cannot start until the prior one is settled.
+
+  On recovery, an intent newer than the snapshot is ignored. A snapshot with a
+  matching intent but missing or partial semantic settlement is authoritative:
+  missing descriptors are replayed exactly and a distinct reconciled event is
+  appended. A committed/reconciled revision newer than the snapshot, missing
+  matching intent, event-ID/content conflict, schema/hash mismatch, or settled
+  snapshot missing an outbox event is corruption. Reconciliation is idempotent
+  and never writes a fabricated original committed event. Persistence invokes
+  `assert_safe_model(checkpoint)` and rejects rather than silently redacting the
+  DAG or checkpoint.
+- **Consequences:** Completed outcomes are never redispatched merely because a
+  trace append crashed, while trace content retains its original identity and
+  time. Only the last mutation can be repaired; this is explicitly not a WAL,
+  transaction log, or event-sourcing design. Windows parent-directory fsync is
+  still best effort.
+
+## ADR-0018: Make idempotency, uncertain usage, and durable replan bounds explicit
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Retry/resume can repeat externally visible operations, provider
+  usage can be unknown after timeout/cancellation/crash, and Phase 2's in-memory
+  replan lineage otherwise creates a restart gap.
+- **Decision:** Each task execution policy declares `operation_version` and an
+  idempotency mode. The stable operation key hashes run, DAG identity/hash,
+  task ID, and operation version; a distinct attempt key additionally hashes
+  the monotonically consumed attempt number. Automatic retry requires an
+  idempotent operation. A recovered `RUNNING` attempt becomes `INTERRUPTED` and
+  consumes its attempt number; non-idempotent or exhausted work fails.
+
+  Runtime budget is an additive quota. `EXACT` usage commits the measured
+  amount, `UPPER_BOUND` commits the conservative reported amount, and `UNKNOWN`
+  converts the full reservation to uncertain consumption. Unknown timeout,
+  cancellation, or interruption usage is never released; only work proven not
+  dispatched receives full release. Reported overrun is committed honestly,
+  marks the ledger breached, and pauses scheduling.
+
+  A replan request reserves a durable slot when written to the checkpoint,
+  stores the pending request, and pauses the executor; Phase 3 does not invoke
+  the planner or apply a replacement DAG. `PerspectivePlanner` exposes the
+  narrow `restore_trusted_lineage` boundary so an external coordinator may
+  restore only a `ReplanContext` already validated against checkpoint schema,
+  hashes, and run identity. The boundary is idempotent and rejects conflicting
+  live lineage. This supersedes ADR-0014's Phase 2-only restart limitation
+  without changing its in-flow validation rules. No database is added.
+- **Consequences:** Retry safety and conservative cost accounting are explicit
+  across restart, and pending replan/accounting can survive a process. Applying
+  a newly validated DAG, updating run lifecycle budget snapshots, and
+  provider-backed reconciliation of uncertain consumption are deferred.
+
+## ADR-0019: Make Phase 3 scheduling progress and runtime replan consumption explicit
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Phase 3 audit found that a restored runtime replan cursor could
+  not be consumed while the run remained `RUNNING`, batch settlement delayed a
+  fast sibling behind the slowest attempt, and retry/budget edge cases could
+  incorrectly report no work or budget exhaustion. Snapshot invariants alone
+  also did not state the legal runtime transition graph.
+- **Decision:** `PerspectivePlanner` exposes a narrow trusted-runtime replan
+  operation that accepts only `RUNNING` run state and an exact lineage cursor
+  previously installed by `restore_trusted_lineage`. It verifies run identity
+  and count limits, consumes the cursor before exactly one model call, returns
+  a genuine planning result, and neither applies a DAG nor changes run
+  lifecycle state.
+
+  The single-writer coordinator keeps an in-memory set of dispatched attempts
+  and waits for `FIRST_COMPLETED`. Simultaneous completions settle in stable
+  dispatch-sequence/task-ID order, but each completed attempt receives its own
+  checkpoint immediately and frees its slot before the ready set is recomputed.
+  Ready scanning examines the complete deterministic order until every slot is
+  filled or every candidate is unreservable. Budget exhaustion is declared
+  only with no running work, no retry that can become eligible, and no
+  reservable ready task.
+
+  `RETRY_WAIT` is a durable scheduler state. `next_eligible_at` is the sole
+  retry deadline: due retries become ready together, future retries cause one
+  wait for the earliest remaining interval, restart never reapplies the full
+  backoff, and run cancellation interrupts the wait. Explicit legal task and
+  attempt transition maps are checked before executor mutations. Attempt
+  terminal trace events follow the attempt's actual terminal cause; therefore
+  a timeout observed during run cancellation emits `ATTEMPT_TIMED_OUT` even
+  though the enclosing task becomes `CANCELLED`.
+- **Consequences:** Checkpoint progress is observable at attempt granularity,
+  durable retries retain their original schedule, independent affordable work
+  is not starved by expensive tasks, and restart can consume a pending runtime
+  replan without fabricating prior planning state. The live dispatch set is
+  intentionally process-local; checkpoint recovery still converts persisted
+  running attempts to interruption according to ADR-0018. Replacement-DAG
+  application and run lifecycle integration remain outside Phase 3.

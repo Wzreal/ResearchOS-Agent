@@ -10,6 +10,7 @@ from researchos.domain.planning import (
     PlanningPolicy,
     PlanningRequest,
     PlanningResult,
+    ReplanContext,
     ReplanPolicy,
     ReplanRequest,
     ReplanResult,
@@ -32,6 +33,25 @@ class Planner(Protocol):
         state: RunState,
         *,
         prior_result: PlanningResult,
+        request: ReplanRequest,
+        planning_policy: PlanningPolicy,
+        replan_policy: ReplanPolicy,
+    ) -> ReplanResult: ...
+
+
+class TrustedReplanLineageRestorer(Protocol):
+    """Restore only context already validated against a durable checkpoint."""
+
+    def restore_trusted_lineage(self, context: ReplanContext) -> None: ...
+
+
+class TrustedRuntimeReplanner(TrustedReplanLineageRestorer, Protocol):
+    """Consume only a checkpoint-verified runtime replan cursor."""
+
+    def replan_from_trusted_runtime_context(
+        self,
+        state: RunState,
+        *,
         request: ReplanRequest,
         planning_policy: PlanningPolicy,
         replan_policy: ReplanPolicy,

@@ -81,7 +81,7 @@ Replanning is a bounded runtime command, not an unrestricted recursive call.
 
 ### 3. DAG Runtime
 
-`AsyncDAGExecutor` will own scheduling mechanics:
+`AsyncDAGExecutor` owns the implemented Phase 3 scheduling mechanics:
 
 - calculate ready nodes from committed dependency outcomes;
 - run tasks within concurrency and resource limits;
@@ -93,8 +93,52 @@ Replanning is a bounded runtime command, not an unrestricted recursive call.
 - reserve and consume budgets atomically;
 - emit scheduling, attempt, checkpoint, budget, and failure events.
 
-The runtime does not know provider details. It dispatches typed task requests to
-registered agent/tool capabilities. Phase 0 intentionally contains no executor.
+The runtime does not know provider details. It dispatches a typed
+`TaskExecutionRequest` through a narrow `TaskExecutionBackend`; Phase 3 provides
+only an exact-fixture offline mock, not an Agent, Tool, capability registry, or
+real provider.
+
+Ready work is ordered by descending task priority, validated topological index,
+then task ID. One async coordinator is the only checkpoint writer. It reserves
+budget and commits a `RUNNING` attempt before dispatch, and commits an outcome
+before unlocking dependents. `ALL_SUCCESS_REQUIRED` is the sole dependency
+policy: failed branches propagate stable root blockers while independent
+branches continue. `ExecutorStatus.COMPLETED` means every task is terminal and
+there is no runnable work; it does not mean every task succeeded. Mapping this
+summary to run `COMPLETED`, `PARTIAL`, or `FAILED` remains an external lifecycle
+integration responsibility.
+
+The runtime checkpoint at `outputs/<run_id>/checkpoint.json` contains the full
+validated DAG and hash, execution policy and hash, run revision, task/attempt
+states, committed outcomes, budget ledger, durable replan accounting, and the
+last mutation's trace outbox. Filesystem snapshots use same-directory temp
+write, file fsync, atomic replace, and parent-directory fsync where supported.
+Checkpoint persistence defensively rejects unsafe data; it never redacts or
+changes the DAG/checkpoint because doing so would invalidate task semantics and
+hashes.
+
+For checkpoint revision `N`, the minimal protocol is trace intent fsync,
+atomic snapshot, exact semantic event replay from the embedded outbox, then
+trace committed fsync. The outbox stores each complete immutable `TraceEvent`
+descriptor, including its original timestamp, identity, sanitized attributes,
+and canonical hash. If a crash leaves the snapshot without settlement, resume
+replays the stored descriptors exactly and emits a separately typed reconciled
+event. It never fabricates a new original event. Only one unsettled mutation is
+supported; this is not a WAL or event-sourcing system.
+
+Execution duration is an additive task-attempt quota, not wall-clock critical
+path time. A reservation is committed as measured usage when certainty is
+`EXACT`, conservatively at its reported amount for `UPPER_BOUND`, and becomes
+uncertain consumption for `UNKNOWN`. Timeout, cancellation, and process
+interruption therefore never release unknown usage. Full release is limited to
+work proven not to have been dispatched. Honest backend overrun is recorded as
+a breach and pauses scheduling.
+
+Run cancellation enters through a run-level controller. Each attempt receives
+only a read-only cancellation signal. New tasks stop, queued work is cancelled,
+and an already dispatched backend is given until its original timeout to
+cooperate. A stable operation key includes `operation_version` and survives
+retry/resume; each consumed attempt has a separate attempt key.
 
 ### 4. Agent and Tool
 
@@ -207,5 +251,6 @@ domain contracts <- application services <- interfaces <- adapters/entrypoints
 ```
 
 The domain layer must not import vendor SDKs or filesystem/network adapters.
-Concrete package boundaries will be introduced only as phases require them; the
-Phase 0 package deliberately contains only version metadata.
+Implemented Phase 1-3 boundaries live under `domain`, `application`,
+`interfaces`, and `adapters`. Future packages are still introduced only when a
+phase has tested behavior rather than as empty capability shells.

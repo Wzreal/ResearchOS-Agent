@@ -40,11 +40,22 @@ not aspiration.
 
 ## Phase 3 — Durable asynchronous DAG runtime
 
-- TODO — Implement ready-queue scheduling and concurrency limits.
-- TODO — Implement attempts, retry/backoff, timeout, and cancellation.
-- TODO — Implement failure isolation and dependency blocking policies.
-- TODO — Implement checkpoint/resume and idempotency enforcement.
-- TODO — Implement budget reservation and bounded dynamic replanning.
+- DONE — Implement deterministic ready-queue scheduling and concurrency limits.
+- DONE — Implement attempts, retry/backoff, timeout, and explicit run
+  cancellation.
+- DONE — Implement `ALL_SUCCESS_REQUIRED` failure isolation and root-cause
+  dependency blocking.
+- DONE — Implement atomic checkpoint/resume, immutable trace outbox recovery,
+  and two-level idempotency keys.
+- DONE — Implement additive budget reservation, usage certainty, overrun
+  handling, durable bounded replan requests, and trusted planner-lineage
+  restoration.
+- DONE — Add deterministic backend fixtures, fault-injection coverage, and a
+  minimal Python 3.11 CI workflow.
+- DONE — Harden runtime replan consumption after restart, completion-driven
+  settlement, durable retry timing, full ready-budget scanning, strict runtime
+  transitions, and timeout/cancellation terminal-cause consistency after PR
+  audit.
 
 ## Phase 4 — Agent and tool adapters
 

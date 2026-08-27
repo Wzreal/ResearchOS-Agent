@@ -42,9 +42,7 @@ class UnsafePersistenceData(ResearchOSError):
 
 
 class StatePersistenceError(ResearchOSError):
-    def __init__(
-        self, message: str, *, run_id: str, state_replaced: bool
-    ) -> None:
+    def __init__(self, message: str, *, run_id: str, state_replaced: bool) -> None:
         super().__init__(message)
         self.run_id = run_id
         self.state_replaced = state_replaced
@@ -77,3 +75,54 @@ class PlanningModelFailure(ResearchOSError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+class CheckpointNotFound(ResearchOSError):
+    pass
+
+
+class CheckpointAlreadyExists(ResearchOSError):
+    pass
+
+
+class CheckpointRevisionConflict(ResearchOSError):
+    pass
+
+
+class CorruptCheckpoint(ResearchOSError):
+    pass
+
+
+class CheckpointCompatibilityError(ResearchOSError):
+    pass
+
+
+class CheckpointPersistenceError(ResearchOSError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str,
+        checkpoint_revision: int,
+        checkpoint_replaced: bool,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.checkpoint_revision = checkpoint_revision
+        self.checkpoint_replaced = checkpoint_replaced
+
+
+class RuntimePreconditionError(ResearchOSError):
+    pass
+
+
+class RuntimeTraceCommitError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, checkpoint_revision: int) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.checkpoint_revision = checkpoint_revision
+        self.checkpoint_committed = True
+
+
+class ReplanLineageConflict(ResearchOSError):
+    pass

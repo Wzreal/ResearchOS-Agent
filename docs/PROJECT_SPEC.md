@@ -108,6 +108,7 @@ outputs/<run_id>/
 ├── manifest.json
 ├── report.md
 ├── run_state.json
+├── checkpoint.json
 ├── trace.jsonl
 ├── evidence.jsonl
 ├── claims.jsonl
@@ -119,6 +120,9 @@ outputs/<run_id>/
 - `manifest.json` records schema versions, creation/completion times, mode,
   sanitized configuration, input hash, and artifact hashes.
 - `run_state.json` is a recoverable state snapshot written atomically.
+- `checkpoint.json` is the Phase 3 atomic DAG-runtime snapshot. It stores the
+  validated DAG/policy hashes, attempts, outcomes, budget/replan state, and the
+  immutable last-mutation trace outbox used for bounded reconciliation.
 - `trace.jsonl` is append-only and contains structured, timestamped events.
 - `evidence.jsonl` and `claims.jsonl` contain versioned normalized records.
 - `report.md` cites claim/evidence identifiers using a documented convention.

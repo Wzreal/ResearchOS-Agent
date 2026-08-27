@@ -383,3 +383,36 @@ def test_mock_has_no_implicit_default_fixture() -> None:
     assert result.status is PlanningStatus.MODEL_ERROR
     assert result.planning_error is not None
     assert result.planning_error.code == "mock_fixture_not_found"
+
+
+def test_fresh_planner_can_consume_checkpoint_trusted_lineage() -> None:
+    state, trace, clock, ids = planning_state()
+    model = MockPlanningModel(
+        {
+            PlanningFixtureKey("normalized query", 0, None): model_response,
+            PlanningFixtureKey("normalized query", 1, "retry"): model_response,
+        }
+    )
+    initial = planner_for(model, trace, clock, ids).plan(
+        state, planning_policy()
+    )
+    restarted = planner_for(model, trace, clock, ids)
+    restarted.restore_trusted_lineage(initial.replan_context)
+
+    result = restarted.replan(
+        state,
+        prior_result=initial,
+        request=ReplanRequest(
+            request_id="replan_after_restart",
+            run_id=state.run_id,
+            context=initial.replan_context,
+            reason_code="retry",
+            reason="resume durable lineage",
+        ),
+        planning_policy=planning_policy(),
+        replan_policy=ReplanPolicy(max_replans=1),
+    )
+
+    assert result.decision.status is ReplanDecisionStatus.APPROVED
+    assert result.planning_result is not None
+    assert result.planning_result.replan_context.replan_count == 1

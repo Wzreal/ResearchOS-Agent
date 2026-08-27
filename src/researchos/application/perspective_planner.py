@@ -12,6 +12,7 @@ from researchos.application.dag_validator import DAGValidator
 from researchos.application.errors import (
     PlanningModelFailure,
     PlanningPreconditionError,
+    ReplanLineageConflict,
 )
 from researchos.domain.contracts import RunState, RunStatus, TraceEvent, TraceEventType
 from researchos.domain.planning import (
@@ -98,6 +99,21 @@ class PerspectivePlanner:
         self._redactor = redactor or PersistenceRedactor()
         self._lineages: dict[str, ReplanContext] = {}
 
+    def restore_trusted_lineage(self, context: ReplanContext) -> None:
+        """Restore a checkpoint-verified cursor without invoking a model.
+
+        The caller owns checkpoint schema/hash/run-identity verification. This
+        narrow boundary is idempotent and refuses to overwrite a different
+        live lineage for the same plan.
+        """
+
+        existing = self._lineages.get(context.prior_plan_id)
+        if existing is not None and existing != context:
+            raise ReplanLineageConflict(
+                "restored replan lineage conflicts with memory"
+            )
+        self._lineages[context.prior_plan_id] = context.model_copy(deep=True)
+
     def plan(self, state: RunState, policy: PlanningPolicy) -> PlanningResult:
         self._require_planning(state)
         request = self._new_request(state, policy=policy)
@@ -148,6 +164,68 @@ class PerspectivePlanner:
                 causation_id=requested_event.event_id,
             )
 
+        return self._approved_replan(
+            state,
+            request=request,
+            planning_policy=planning_policy,
+            causation_id=requested_event.event_id,
+        )
+
+    def replan_from_trusted_runtime_context(
+        self,
+        state: RunState,
+        *,
+        request: ReplanRequest,
+        planning_policy: PlanningPolicy,
+        replan_policy: ReplanPolicy,
+    ) -> ReplanResult:
+        """Consume a checkpoint-verified runtime lineage without lifecycle mutation."""
+
+        if state.status is not RunStatus.RUNNING:
+            raise PlanningPreconditionError(
+                "trusted runtime replan requires RunStatus.RUNNING"
+            )
+        requested_event = self._append_trace(
+            state,
+            TraceEventType.REPLAN_REQUESTED,
+            correlation_id=request.request_id,
+            attributes={
+                "plan_id": request.context.prior_plan_id,
+                "replan_count": request.context.replan_count,
+                "reason_code": request.reason_code,
+                "runtime_replan": True,
+            },
+        )
+        restored = self._lineages.get(request.context.prior_plan_id)
+        if request.run_id != state.run_id or restored != request.context:
+            return self._reject_replan(
+                state,
+                request,
+                ReplanDecisionStatus.REJECTED_CONTEXT,
+                causation_id=requested_event.event_id,
+            )
+        if request.context.replan_count >= replan_policy.max_replans:
+            return self._reject_replan(
+                state,
+                request,
+                ReplanDecisionStatus.REJECTED_LIMIT,
+                causation_id=requested_event.event_id,
+            )
+        return self._approved_replan(
+            state,
+            request=request,
+            planning_policy=planning_policy,
+            causation_id=requested_event.event_id,
+        )
+
+    def _approved_replan(
+        self,
+        state: RunState,
+        *,
+        request: ReplanRequest,
+        planning_policy: PlanningPolicy,
+        causation_id: str,
+    ) -> ReplanResult:
         decision = ReplanDecision(
             decision_id=self._new_id("decision"),
             request_id=request.request_id,
@@ -160,7 +238,7 @@ class PerspectivePlanner:
             reason_code=request.reason_code,
         )
         decision_event = self._decision_trace(
-            state, decision, causation_id=requested_event.event_id
+            state, decision, causation_id=causation_id
         )
         # Consume the cursor before invoking the model so the same prior result
         # cannot fork an unbounded number of approved replans in this flow.
