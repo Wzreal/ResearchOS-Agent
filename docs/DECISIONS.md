@@ -190,3 +190,93 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   run without changing the intent-state-committed protocol. Cross-run trace
   contamination and unsafe persisted trace data fail as corruption rather than
   being accepted or silently rewritten.
+
+## ADR-0013: Separate candidate plans from canonical validated task DAGs
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** A planning model must be allowed to return structurally parseable
+  but semantically invalid candidates so that dependency, policy, capability,
+  and budget failures remain typed and testable. Treating model output as an
+  executable graph would bypass that trust boundary.
+- **Decision:** Phase 2 uses versioned provider-independent contracts for
+  perspectives, research tasks, typed dependencies, resource estimates,
+  planner metadata, candidates, validation results, and `TaskDAG`. Candidate
+  contracts admit semantic errors; the deterministic validator emits stable,
+  sorted issue codes and computes a lexicographically stable topological order,
+  graph depth, aggregate token/cost/tool estimates, and dependency-critical-path
+  duration. It validates candidate run and plan identity and requires
+  `PlanningModelResponse.planning_model_id` to equal the candidate planner
+  metadata model ID. Only a candidate with zero validation errors can be
+  normalized into a strict `TaskDAG`. Duration feasibility uses the longest
+  dependency path; other resource feasibility uses the sum across all tasks.
+  Capability authorization is a subset check against the run configuration and
+  does not introduce a capability registry. Phase 2 returns the DAG and records
+  sanitized planning trace summaries but does not persist it or alter
+  `RunState`.
+- **Consequences:** Invalid model output has deterministic diagnostics and a
+  validated DAG has canonical hashing behavior without `networkx` or provider
+  SDKs. Model quality, estimate accuracy, DAG persistence, checkpointing,
+  scheduling, and execution remain outside Phase 2.
+
+## ADR-0014: Use one-shot planning with in-flow bounded replan lineage
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Replanning must be bounded without accepting a caller-supplied
+  integer that can be reset, while Phase 2 explicitly excludes databases,
+  checkpoint resume, and durable runtime accounting. Model transport failures
+  must also remain distinct from candidate validation failures.
+- **Decision:** `PerspectivePlanner` requires a run already in `PLANNING`, calls
+  the provider-independent `PlanningModel` at most once per `plan()` or approved
+  `replan()` invocation, and never performs a recursive repair loop. Every
+  result produces a `ReplanContext` containing its plan ID, cumulative replan
+  count, and prior decision ID. The service keeps these cursors in memory,
+  validates the exact prior result/context/decision lineage, and consumes an
+  approved prior cursor before making the next model call, preventing caller
+  resets and repeated forks within one application flow. The deterministic mock
+  selects fixtures by normalized query, replan count, and reason code, with no
+  default success or real-to-mock fallback.
+
+  `PlanningResult.validation` is optional with status-specific invariants:
+  `VALIDATED` requires a valid result and DAG; `INVALID` requires an invalid
+  result and no DAG; `MALFORMED` requires an invalid result containing
+  `candidate_malformed`; and `MODEL_ERROR` requires `validation=None` plus a
+  planning error. Model failures never receive a fabricated validation result.
+  Planning and replan decisions emit sanitized structured trace events without
+  raw provider payloads or queries.
+- **Consequences:** Replan bounds and provenance are reliable for one live
+  service flow and deterministic offline tests can model invalid-to-valid
+  repair. Process restart loses the lineage registry by design. Durable replan
+  accounting, DAG storage, runtime checkpoint/resume, and budget reservation
+  are Phase 3 responsibilities.
+
+## ADR-0015: Make Phase 2 validation provenance and partial metrics explicit
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Review of the Phase 2 contracts found that partial graph metrics
+  could appear authoritative after unsafe structural failures, planning
+  requests omitted important run context, malformed Pydantic diagnostics could
+  retain candidate input, and expected outputs lacked stable identity.
+- **Decision:** `ValidationResult` exposes topological order, graph depth, and
+  critical-path duration only when the candidate graph is structurally safe.
+  Duplicate or invalid task IDs, unknown/self/duplicate dependencies, and
+  cycles suppress all three values and suppress duration-budget feasibility;
+  aggregate token, cost, and tool-call checks remain independent. Validation is
+  valid exactly when it contains no `ERROR` issue, so warnings do not invalidate
+  a candidate. Expected outputs use an explicit task-local unique `output_id`
+  and canonical ordering by that ID, plus description and media type.
+
+  Every `PlanningRequest` records run revision, source policy, output format,
+  and an injected-clock request timestamp. Planning results and validated DAGs
+  carry the same run revision, while trace events already record it in their
+  revision field. Candidate parse failures use Pydantic errors with input and
+  URLs excluded, then retain only allowlisted locations, stable error types,
+  and a constant sanitized message. Raw candidate input and provider responses
+  never enter validation issues or trace.
+- **Consequences:** Consumers can distinguish unavailable graph metrics from
+  zero-valued metrics and correlate a plan with its exact run snapshot without
+  adding persistence. Diagnostic detail is intentionally less verbose to
+  guarantee that malformed free text is not retained. Durable plan provenance,
+  persistence, and recovery remain Phase 3 work.

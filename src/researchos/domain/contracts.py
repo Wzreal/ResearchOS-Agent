@@ -91,6 +91,13 @@ class TraceEventType(StrEnum):
     TRANSITION_COMMITTED = "run.transition_committed"
     TRANSITION_RECONCILED = "run.transition_reconciled"
     RESUMED = "run.resumed"
+    PLANNING_STARTED = "planning.started"
+    PLANNING_CANDIDATE_RECEIVED = "planning.candidate_received"
+    PLANNING_MODEL_FAILED = "planning.model_failed"
+    PLANNING_VALIDATION_FAILED = "planning.validation_failed"
+    PLANNING_VALIDATED = "planning.validated"
+    REPLAN_REQUESTED = "planning.replan_requested"
+    REPLAN_DECISION = "planning.replan_decision"
 
 
 class RunInput(ContractModel):

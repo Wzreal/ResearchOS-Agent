@@ -64,3 +64,16 @@ class TraceCommitError(ResearchOSError):
         self.transition_id = transition_id
         self.revision = revision
         self.state_committed = True
+
+
+class PlanningPreconditionError(ResearchOSError):
+    """Planning was requested outside its Phase 2 lifecycle boundary."""
+
+
+class PlanningModelFailure(ResearchOSError):
+    """Stable provider-independent model boundary failure."""
+
+    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable

@@ -3,9 +3,10 @@
 ResearchOS Agent is a planned recoverable, verifiable multi-agent system for
 complex, long-running deep-research tasks.
 
-The project has completed **Phase 1**: versioned domain contracts, a strict run
-lifecycle, deterministic in-memory storage, atomic filesystem state storage,
-and structured lifecycle tracing are implemented. The DAG runtime, agents,
+The project has completed **Phase 2**: Phase 1 run lifecycle and crash recovery
+are joined by provider-independent perspective planning, deterministic
+candidate validation, canonical validated task DAGs, an offline planning mock,
+and bounded in-flow replan decisions. DAG execution and persistence, agents,
 integrations, evidence memory, verification roles, and evaluation execution are
 not implemented.
 
@@ -43,9 +44,9 @@ import researchos
 print(researchos.__version__)
 ```
 
-Phase 1 supports lifecycle execution in explicit mock mode. Real mode is a
-valid configuration value but fails before persistence because no real adapter
-exists yet; it never falls back to mock.
+The implemented phases support lifecycle and planning tests in explicit mock
+mode. Real mode is a valid configuration value but fails before persistence
+because no real adapter exists yet; it never falls back to mock.
 
 ## Repository layout
 
