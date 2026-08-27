@@ -12,6 +12,7 @@ from researchos.application.dag_validator import DAGValidator
 from researchos.application.errors import (
     PlanningModelFailure,
     PlanningPreconditionError,
+    ReplanLineageConflict,
 )
 from researchos.domain.contracts import RunState, RunStatus, TraceEvent, TraceEventType
 from researchos.domain.planning import (
@@ -97,6 +98,21 @@ class PerspectivePlanner:
         self._id_factory = id_factory or _default_id_factory
         self._redactor = redactor or PersistenceRedactor()
         self._lineages: dict[str, ReplanContext] = {}
+
+    def restore_trusted_lineage(self, context: ReplanContext) -> None:
+        """Restore a checkpoint-verified cursor without invoking a model.
+
+        The caller owns checkpoint schema/hash/run-identity verification. This
+        narrow boundary is idempotent and refuses to overwrite a different
+        live lineage for the same plan.
+        """
+
+        existing = self._lineages.get(context.prior_plan_id)
+        if existing is not None and existing != context:
+            raise ReplanLineageConflict(
+                "restored replan lineage conflicts with memory"
+            )
+        self._lineages[context.prior_plan_id] = context.model_copy(deep=True)
 
     def plan(self, state: RunState, policy: PlanningPolicy) -> PlanningResult:
         self._require_planning(state)

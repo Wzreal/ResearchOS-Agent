@@ -7,10 +7,10 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
-from uuid import uuid4
 
 from pydantic import ValidationError
 
+from researchos.adapters._atomic_file import AtomicWriteFailure, atomic_replace_bytes
 from researchos.application.errors import (
     CorruptRunState,
     IncompatibleSchema,
@@ -54,23 +54,6 @@ class _FilesystemBase:
         if result.parent != self.root:
             raise ValueError("run path escapes output root")
         return result
-
-    @staticmethod
-    def _fsync_parent(path: Path) -> None:
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-        except OSError:
-            if os.name == "nt":
-                return
-            raise
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            if os.name != "nt":
-                raise
-        finally:
-            os.close(descriptor)
-
 
 class FilesystemRunStore(_FilesystemBase):
     state_filename = "run_state.json"
@@ -133,33 +116,14 @@ class FilesystemRunStore(_FilesystemBase):
             )
 
     def _atomic_write(self, path: Path, data: bytes, *, run_id: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
-        replaced = False
         try:
-            self._fault("before_temp_write")
-            with temp_path.open("xb") as handle:
-                handle.write(data)
-                self._fault("after_temp_write")
-                handle.flush()
-                self._fault("after_temp_flush")
-                os.fsync(handle.fileno())
-                self._fault("after_temp_fsync")
-            self._fault("before_replace")
-            os.replace(temp_path, path)
-            replaced = True
-            self._fault("after_replace")
-            self._fsync_parent(path.parent)
-            self._fault("after_parent_fsync")
-        except Exception as exc:
+            atomic_replace_bytes(path, data, fault=self._fault)
+        except AtomicWriteFailure as exc:
             raise StatePersistenceError(
                 "atomic state write failed",
                 run_id=run_id,
-                state_replaced=replaced,
+                state_replaced=exc.replaced,
             ) from exc
-        finally:
-            if not replaced and temp_path.exists():
-                temp_path.unlink()
 
 
 class FilesystemTraceSink(_FilesystemBase):

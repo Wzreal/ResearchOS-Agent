@@ -10,6 +10,7 @@ from researchos.domain.planning import (
     PlanningPolicy,
     PlanningRequest,
     PlanningResult,
+    ReplanContext,
     ReplanPolicy,
     ReplanRequest,
     ReplanResult,
@@ -36,3 +37,9 @@ class Planner(Protocol):
         planning_policy: PlanningPolicy,
         replan_policy: ReplanPolicy,
     ) -> ReplanResult: ...
+
+
+class TrustedReplanLineageRestorer(Protocol):
+    """Restore only context already validated against a durable checkpoint."""
+
+    def restore_trusted_lineage(self, context: ReplanContext) -> None: ...
