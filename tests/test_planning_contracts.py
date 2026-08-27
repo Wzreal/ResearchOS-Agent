@@ -12,6 +12,7 @@ from researchos.domain.planning import (
     ValidationIssue,
     ValidationIssueCode,
     ValidationResult,
+    ValidationSeverity,
 )
 
 
@@ -19,6 +20,7 @@ def base_result(**overrides):
     values = {
         "status": PlanningStatus.MODEL_ERROR,
         "run_id": "run_test",
+        "run_revision": 2,
         "plan_id": "plan_test",
         "planning_request_id": "preq_test",
         "validation": None,
@@ -61,10 +63,28 @@ def test_malformed_requires_candidate_malformed_issue() -> None:
             validation=ValidationResult(valid=False, issues=(other_issue,)),
             planning_error=None,
         )
-    malformed = DAGValidator.malformed_result("bad payload")
+    malformed = DAGValidator.malformed_result(
+        [
+            {
+                "loc": ["tasks", 0, "task_id"],
+                "type": "string_type",
+                "message": "candidate field failed validation",
+            }
+        ]
+    )
     result = base_result(
         status=PlanningStatus.MALFORMED,
         validation=malformed,
         planning_error=None,
     )
     assert result.validation is malformed
+
+
+def test_warning_only_validation_result_is_valid() -> None:
+    warning = ValidationIssue(
+        code=ValidationIssueCode.ORPHAN_PERSPECTIVE,
+        severity=ValidationSeverity.WARNING,
+        message="non-blocking warning",
+    )
+    result = ValidationResult(valid=True, issues=(warning,))
+    assert result.valid

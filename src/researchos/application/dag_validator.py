@@ -22,6 +22,7 @@ from researchos.domain.planning import (
     ValidationIssue,
     ValidationIssueCode,
     ValidationResult,
+    ValidationSeverity,
     ValidationSummary,
 )
 
@@ -212,25 +213,25 @@ class DAGValidator:
                         details={"capability_id": capability_id},
                     )
 
-            output_keys = [
-                (output.name.strip(), output.media_type.strip())
+            output_ids = [output.output_id for output in task.expected_outputs]
+            if not output_ids or any(
+                not self._is_safe_id(output.output_id)
+                or not output.description.strip()
+                or not output.media_type.strip()
                 for output in task.expected_outputs
-            ]
-            if not output_keys or any(
-                not name or not media for name, media in output_keys
             ):
                 add(
                     ValidationIssueCode.INVALID_EXPECTED_OUTPUT,
-                    "task must declare non-blank expected outputs",
+                    "task must declare identified non-blank expected outputs",
                     task_id=task_id,
                 )
-            for output_key, count in Counter(output_keys).items():
+            for output_id, count in Counter(output_ids).items():
                 if count > 1:
                     add(
                         ValidationIssueCode.DUPLICATE_EXPECTED_OUTPUT,
-                        "expected output is duplicated",
+                        "expected output ID is duplicated within task",
                         task_id=task_id,
-                        details={"name": output_key[0], "media_type": output_key[1]},
+                        details={"output_id": output_id},
                     )
 
         for perspective_id in sorted(known_perspectives):
@@ -244,16 +245,36 @@ class DAGValidator:
                     perspective_id=perspective_id,
                 )
 
-        topo, graph_depth, critical_duration, cycle = self._graph_metrics(
-            candidate, graph, reverse_graph
-        )
-        if cycle:
-            add(
-                ValidationIssueCode.CYCLE_DETECTED,
-                "task dependencies contain a cycle",
-                details={"cycle": cycle},
+        unsafe_codes = {
+            ValidationIssueCode.DUPLICATE_TASK_ID,
+            ValidationIssueCode.INVALID_TASK_ID,
+            ValidationIssueCode.UNKNOWN_DEPENDENCY,
+            ValidationIssueCode.SELF_DEPENDENCY,
+            ValidationIssueCode.DUPLICATE_DEPENDENCY,
+        }
+        structurally_safe = not any(issue.code in unsafe_codes for issue in issues)
+        topo: list[str] = []
+        graph_depth: int | None = None
+        critical_duration: int | None = None
+        if structurally_safe:
+            topo, graph_depth, critical_duration, cycle = self._graph_metrics(
+                candidate, graph, reverse_graph
             )
-        if graph_depth > request.policy.max_graph_depth:
+            if cycle:
+                add(
+                    ValidationIssueCode.CYCLE_DETECTED,
+                    "task dependencies contain a cycle",
+                    details={"cycle": cycle},
+                )
+                topo = []
+                graph_depth = None
+                critical_duration = None
+                structurally_safe = False
+        if (
+            structurally_safe
+            and graph_depth is not None
+            and graph_depth > request.policy.max_graph_depth
+        ):
             add(
                 ValidationIssueCode.DEPTH_LIMIT_EXCEEDED,
                 "task graph exceeds maximum depth",
@@ -267,13 +288,19 @@ class DAGValidator:
         for task in candidate.tasks:
             total = total.plus(task.estimate)
         remaining = request.remaining_budget
-        for actual, limit, code, name in (
-            (
-                critical_duration,
-                remaining.duration_milliseconds,
+        if (
+            critical_duration is not None
+            and critical_duration > remaining.duration_milliseconds
+        ):
+            add(
                 ValidationIssueCode.BUDGET_DURATION_EXCEEDED,
-                "critical path duration",
-            ),
+                "estimated critical path duration exceeds remaining budget",
+                details={
+                    "actual": critical_duration,
+                    "remaining": remaining.duration_milliseconds,
+                },
+            )
+        for actual, limit, code, name in (
             (
                 total.tokens,
                 remaining.tokens,
@@ -301,11 +328,13 @@ class DAGValidator:
                 )
 
         sorted_issues = tuple(sorted(issues, key=self._issue_key))
-        valid = not sorted_issues
+        valid = not any(
+            issue.severity is ValidationSeverity.ERROR for issue in sorted_issues
+        )
         return ValidationResult(
             valid=valid,
             issues=sorted_issues,
-            topological_order=tuple(topo) if valid else (),
+            topological_order=tuple(topo) if structurally_safe else (),
             graph_depth=graph_depth,
             total_estimate=total,
             critical_path_duration_milliseconds=critical_duration,
@@ -326,6 +355,11 @@ class DAGValidator:
 
         if not validation.valid:
             raise ValueError("cannot build a DAG from invalid validation")
+        if (
+            validation.graph_depth is None
+            or validation.critical_path_duration_milliseconds is None
+        ):
+            raise ValueError("cannot build a DAG without reliable graph metrics")
         perspectives = tuple(
             Perspective(
                 perspective_id=item.perspective_id,
@@ -353,14 +387,13 @@ class DAGValidator:
                 required_capability_ids=tuple(sorted(item.required_capability_ids)),
                 expected_outputs=tuple(
                     ExpectedOutput(
-                        name=output.name.strip(), media_type=output.media_type.strip()
+                        output_id=output.output_id,
+                        description=output.description.strip(),
+                        media_type=output.media_type.strip(),
                     )
                     for output in sorted(
                         item.expected_outputs,
-                        key=lambda output: (
-                            output.name.strip(),
-                            output.media_type.strip(),
-                        ),
+                        key=lambda output: output.output_id,
                     )
                 ),
                 estimate=item.estimate,
@@ -381,6 +414,7 @@ class DAGValidator:
             dag_id=dag_id,
             plan_id=candidate.plan_id,
             run_id=candidate.run_id,
+            run_revision=request.run_revision,
             planning_request_id=request.request_id,
             perspectives=perspectives,
             tasks=tasks,
@@ -391,11 +425,11 @@ class DAGValidator:
         )
 
     @staticmethod
-    def malformed_result(message: str) -> ValidationResult:
+    def malformed_result(errors: list[dict[str, object]]) -> ValidationResult:
         issue = ValidationIssue(
             code=ValidationIssueCode.CANDIDATE_MALFORMED,
             message="candidate plan payload is malformed",
-            details={"validation_error": message[:1_000]},
+            details={"errors": errors},
         )
         return ValidationResult(valid=False, issues=(issue,))
 

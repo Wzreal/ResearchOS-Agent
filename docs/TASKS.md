@@ -35,6 +35,8 @@ not aspiration.
 - DONE — Implement DAG structural and policy validation.
 - DONE — Define planner/model interfaces plus deterministic mock fixtures.
 - DONE — Trace planning and bounded replan decisions.
+- DONE — Harden graph-metric safety, request provenance, malformed-error
+  sanitization, and explicit expected-output identity after PR review.
 
 ## Phase 3 — Durable asynchronous DAG runtime
 

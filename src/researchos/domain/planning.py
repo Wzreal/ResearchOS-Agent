@@ -54,15 +54,17 @@ class TaskDependency(ContractModel):
 
 
 class CandidateExpectedOutput(ContractModel):
-    name: str
+    output_id: str
+    description: str
     media_type: str
 
 
 class ExpectedOutput(ContractModel):
-    name: Annotated[str, StringConstraints(min_length=1, max_length=255)]
+    output_id: SafeId
+    description: NonBlank
     media_type: Annotated[str, StringConstraints(min_length=1, max_length=255)]
 
-    @field_validator("name", "media_type")
+    @field_validator("description", "media_type")
     @classmethod
     def output_fields_must_not_be_blank(cls, value: str) -> str:
         if not value.strip():
@@ -120,6 +122,13 @@ class ResearchTask(ContractModel):
         if not value.strip():
             raise ValueError("task objective must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def output_ids_must_be_unique(self) -> ResearchTask:
+        output_ids = [output.output_id for output in self.expected_outputs]
+        if len(output_ids) != len(set(output_ids)):
+            raise ValueError("expected output IDs must be unique within a task")
+        return self
 
 
 class PlanningPolicy(ContractModel):
@@ -202,9 +211,9 @@ class ValidationResult(ContractModel):
     valid: bool
     issues: tuple[ValidationIssue, ...]
     topological_order: tuple[str, ...] = ()
-    graph_depth: int = Field(default=0, ge=0)
+    graph_depth: int | None = Field(default=None, ge=0)
     total_estimate: ResourceEstimate = Field(default_factory=ResourceEstimate)
-    critical_path_duration_milliseconds: int = Field(default=0, ge=0)
+    critical_path_duration_milliseconds: int | None = Field(default=None, ge=0)
     perspective_count: int = Field(default=0, ge=0)
     task_count: int = Field(default=0, ge=0)
 
@@ -213,10 +222,15 @@ class ValidationResult(ContractModel):
         has_errors = any(
             issue.severity is ValidationSeverity.ERROR for issue in self.issues
         )
-        if self.valid == has_errors:
+        if self.valid != (not has_errors):
             raise ValueError("valid must be true exactly when there are no errors")
-        if not self.valid and self.topological_order:
-            raise ValueError("invalid validation cannot expose topological order")
+        metrics_available = self.graph_depth is not None
+        if metrics_available != (
+            self.critical_path_duration_milliseconds is not None
+        ):
+            raise ValueError("graph metrics must be available or absent together")
+        if not metrics_available and self.topological_order:
+            raise ValueError("unsafe graph cannot expose topological order")
         return self
 
 
@@ -234,6 +248,7 @@ class TaskDAG(ContractModel):
     dag_id: SafeId
     plan_id: SafeId
     run_id: SafeId
+    run_revision: int = Field(ge=0)
     planning_request_id: SafeId
     perspectives: tuple[Perspective, ...]
     tasks: tuple[ResearchTask, ...]
@@ -297,8 +312,12 @@ class PlanningRequest(ContractModel):
     schema_version: Literal[PLANNING_SCHEMA_VERSION] = PLANNING_SCHEMA_VERSION
     request_id: SafeId
     run_id: SafeId
+    run_revision: int = Field(ge=0)
     plan_id: SafeId
     query: NonBlank
+    source_policy_id: SafeId | None = None
+    output_format: Annotated[str, StringConstraints(min_length=1, max_length=80)]
+    requested_at: datetime
     allowed_capability_ids: tuple[SafeId, ...]
     remaining_budget: RemainingBudget
     policy: PlanningPolicy
@@ -307,6 +326,8 @@ class PlanningRequest(ContractModel):
     reason: Annotated[str, StringConstraints(min_length=1, max_length=1_000)] | None = (
         None
     )
+
+    _aware_requested = field_validator("requested_at")(_require_aware)
 
     @model_validator(mode="after")
     def replan_fields_are_consistent(self) -> PlanningRequest:
@@ -349,6 +370,7 @@ class PlanningError(ContractModel):
 class PlanningResult(ContractModel):
     status: PlanningStatus
     run_id: SafeId
+    run_revision: int = Field(ge=0)
     plan_id: SafeId
     planning_request_id: SafeId
     validation: ValidationResult | None
@@ -364,12 +386,15 @@ class PlanningResult(ContractModel):
             if (
                 self.validation is None
                 or not self.validation.valid
+                or self.validation.graph_depth is None
+                or self.validation.critical_path_duration_milliseconds is None
                 or self.validated_dag is None
                 or self.planning_error is not None
             ):
                 raise ValueError("invalid VALIDATED planning result")
             if (
                 self.validated_dag.run_id != self.run_id
+                or self.validated_dag.run_revision != self.run_revision
                 or self.validated_dag.plan_id != self.plan_id
                 or self.validated_dag.planning_request_id
                 != self.planning_request_id

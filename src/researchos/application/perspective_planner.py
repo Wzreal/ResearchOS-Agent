@@ -36,6 +36,42 @@ from researchos.security.redaction import PersistenceRedactor
 
 IdFactory = Callable[[str], str]
 
+_CANDIDATE_LOCATION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "plan_id",
+        "perspectives",
+        "perspective_id",
+        "name",
+        "title",
+        "goal",
+        "rationale",
+        "priority",
+        "tasks",
+        "task_id",
+        "objective",
+        "dependencies",
+        "required_capability_ids",
+        "expected_outputs",
+        "output_id",
+        "description",
+        "media_type",
+        "estimate",
+        "duration_milliseconds",
+        "tokens",
+        "cost_microunits",
+        "tool_calls",
+        "policy",
+        "required",
+        "planner_metadata",
+        "metadata_version",
+        "planning_model_id",
+        "planner_id",
+        "planner_version",
+    }
+)
+
 
 def _default_id_factory(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
@@ -92,6 +128,7 @@ class PerspectivePlanner:
         context_valid = (
             request.run_id == state.run_id
             and prior_result.run_id == state.run_id
+            and prior_result.run_revision == state.revision
             and prior_result.plan_id == request.context.prior_plan_id
             and prior_result.replan_context == request.context
             and self._lineages.get(request.context.prior_plan_id) == request.context
@@ -159,6 +196,7 @@ class PerspectivePlanner:
             causation_id=causation_id,
             attributes={
                 "plan_id": request.plan_id,
+                "run_revision": request.run_revision,
                 "replan_count": request.replan_count,
                 "reason_code": request.reason_code,
             },
@@ -190,6 +228,7 @@ class PerspectivePlanner:
             return PlanningResult(
                 status=PlanningStatus.MODEL_ERROR,
                 run_id=state.run_id,
+                run_revision=request.run_revision,
                 plan_id=request.plan_id,
                 planning_request_id=request.request_id,
                 validation=None,
@@ -210,7 +249,9 @@ class PerspectivePlanner:
         try:
             candidate = CandidatePlan.model_validate(response.payload)
         except ValidationError as exc:
-            validation = self._validator.malformed_result(self._safe_text(str(exc)))
+            validation = self._validator.malformed_result(
+                self._candidate_validation_errors(exc)
+            )
             self._validation_failed_trace(
                 state,
                 request,
@@ -220,6 +261,7 @@ class PerspectivePlanner:
             return PlanningResult(
                 status=PlanningStatus.MALFORMED,
                 run_id=state.run_id,
+                run_revision=request.run_revision,
                 plan_id=request.plan_id,
                 planning_request_id=request.request_id,
                 validation=validation,
@@ -239,6 +281,7 @@ class PerspectivePlanner:
             return PlanningResult(
                 status=PlanningStatus.INVALID,
                 run_id=state.run_id,
+                run_revision=request.run_revision,
                 plan_id=request.plan_id,
                 planning_request_id=request.request_id,
                 validation=validation,
@@ -267,6 +310,7 @@ class PerspectivePlanner:
         return PlanningResult(
             status=PlanningStatus.VALIDATED,
             run_id=state.run_id,
+            run_revision=request.run_revision,
             plan_id=request.plan_id,
             planning_request_id=request.request_id,
             validation=validation,
@@ -288,8 +332,12 @@ class PerspectivePlanner:
         return PlanningRequest(
             request_id=self._new_id("preq"),
             run_id=state.run_id,
+            run_revision=state.revision,
             plan_id=self._new_id("plan"),
             query=state.input_snapshot.query,
+            source_policy_id=state.config.source_policy_id,
+            output_format=state.config.output_format,
+            requested_at=self._clock.now(),
             allowed_capability_ids=state.config.allowed_capability_ids,
             remaining_budget=RemainingBudget(
                 duration_milliseconds=(
@@ -394,6 +442,39 @@ class PerspectivePlanner:
         safe = self._redactor.redact_value(value)
         assert isinstance(safe, str)
         return safe[:1_000] or "planning model failed"
+
+    @staticmethod
+    def _candidate_validation_errors(
+        exc: ValidationError,
+    ) -> list[dict[str, object]]:
+        sanitized: list[dict[str, object]] = []
+        for error in exc.errors(include_input=False, include_url=False):
+            location = [
+                segment
+                if isinstance(segment, int)
+                or (
+                    isinstance(segment, str)
+                    and segment in _CANDIDATE_LOCATION_FIELDS
+                )
+                else "<field>"
+                for segment in error.get("loc", ())
+            ]
+            error_type = error.get("type")
+            stable_type = (
+                error_type
+                if isinstance(error_type, str)
+                and error_type.replace("_", "").replace(".", "").isalnum()
+                and len(error_type) <= 100
+                else "validation_error"
+            )
+            sanitized.append(
+                {
+                    "loc": location,
+                    "type": stable_type,
+                    "message": "candidate field failed validation",
+                }
+            )
+        return sanitized
 
     @staticmethod
     def _require_planning(state: RunState) -> None:

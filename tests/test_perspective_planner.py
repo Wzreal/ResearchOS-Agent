@@ -35,7 +35,11 @@ def planning_state(*, query: str = "normalized query"):
     )
     created = manager.create(
         RunInput(query=query),
-        RunConfig(allowed_capability_ids=("search", "read")),
+        RunConfig(
+            allowed_capability_ids=("search", "read"),
+            source_policy_id="sources_primary",
+            output_format="json",
+        ),
     )
     return manager.transition(created.run_id, RunStatus.PLANNING), trace, clock, ids
 
@@ -64,6 +68,13 @@ def test_mock_planner_returns_validated_dag_and_ordered_trace() -> None:
     assert result.status is PlanningStatus.VALIDATED
     assert result.validation is not None and result.validation.valid
     assert result.validated_dag is not None
+    assert result.run_revision == state.revision
+    assert result.validated_dag.run_revision == state.revision
+    planning_request = model.requests[0]
+    assert planning_request.run_revision == state.revision
+    assert planning_request.source_policy_id == "sources_primary"
+    assert planning_request.output_format == "json"
+    assert planning_request.requested_at == clock.now()
     planning_events = [
         event.event_type
         for event in trace.read(state.run_id)
@@ -74,6 +85,11 @@ def test_mock_planner_returns_validated_dag_and_ordered_trace() -> None:
         TraceEventType.PLANNING_CANDIDATE_RECEIVED,
         TraceEventType.PLANNING_VALIDATED,
     ]
+    assert all(
+        event.revision == state.revision
+        for event in trace.read(state.run_id)
+        if event.event_type.value.startswith("planning.")
+    )
 
 
 def test_malformed_candidate_has_real_validation_but_model_error_does_not() -> None:
@@ -109,6 +125,36 @@ def test_malformed_candidate_has_real_validation_but_model_error_does_not() -> N
     assert failed.status is PlanningStatus.MODEL_ERROR
     assert failed.validation is None
     assert failed.planning_error is not None
+
+
+def test_malformed_candidate_error_details_do_not_leak_sensitive_input() -> None:
+    state, trace, clock, ids = planning_state()
+    secret = "highly-sensitive-free-text-928374"
+
+    def malformed_with_secret(request):
+        payload = candidate_payload(request)
+        payload["tasks"][0]["objective"] = {"private": secret}
+        payload[secret] = "unexpected field"
+        return PlanningModelResponse(planning_model_id="mock_model", payload=payload)
+
+    model = MockPlanningModel(
+        {
+            PlanningFixtureKey(
+                "normalized query", 0, None
+            ): malformed_with_secret
+        }
+    )
+    result = planner_for(model, trace, clock, ids).plan(state, planning_policy())
+    persisted_view = result.model_dump_json() + "".join(
+        event.model_dump_json() for event in trace.read(state.run_id)
+    )
+    assert result.status is PlanningStatus.MALFORMED
+    assert secret not in persisted_view
+    assert result.validation is not None
+    errors = result.validation.issues[0].details["errors"]
+    assert errors
+    assert all(set(error) == {"loc", "type", "message"} for error in errors)
+    assert all("input" not in error and "url" not in error for error in errors)
 
 
 def test_provenance_mismatch_is_invalid() -> None:

@@ -129,6 +129,100 @@ def test_structural_validation_matrix(mutate, expected) -> None:
     assert expected in issue_codes(validate_payload(payload, request=request))
 
 
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (
+            lambda data: data["tasks"].append(deepcopy(data["tasks"][0])),
+            ValidationIssueCode.DUPLICATE_TASK_ID,
+        ),
+        (
+            lambda data: data["tasks"][0].update(task_id="INVALID TASK"),
+            ValidationIssueCode.INVALID_TASK_ID,
+        ),
+        (
+            lambda data: data["tasks"][0].update(
+                dependencies=[{"task_id": "missing"}]
+            ),
+            ValidationIssueCode.UNKNOWN_DEPENDENCY,
+        ),
+        (
+            lambda data: data["tasks"][0].update(
+                dependencies=[{"task_id": "task_a"}]
+            ),
+            ValidationIssueCode.SELF_DEPENDENCY,
+        ),
+        (
+            lambda data: data["tasks"][2].update(
+                dependencies=[{"task_id": "task_a"}, {"task_id": "task_a"}]
+            ),
+            ValidationIssueCode.DUPLICATE_DEPENDENCY,
+        ),
+        (
+            lambda data: data["tasks"][0].update(
+                dependencies=[{"task_id": "task_c"}]
+            ),
+            ValidationIssueCode.CYCLE_DETECTED,
+        ),
+    ],
+)
+def test_structurally_unsafe_graph_suppresses_metrics_and_duration_budget(
+    mutate, expected
+) -> None:
+    request = planning_request(
+        remaining_budget=RemainingBudget(
+            duration_milliseconds=0,
+            tokens=1,
+            cost_microunits=1,
+            tool_calls=1,
+        )
+    )
+    payload = candidate_payload(request)
+    mutate(payload)
+    result = validate_payload(payload, request=request)
+    assert expected in issue_codes(result)
+    assert result.topological_order == ()
+    assert result.graph_depth is None
+    assert result.critical_path_duration_milliseconds is None
+    assert ValidationIssueCode.BUDGET_DURATION_EXCEEDED not in issue_codes(result)
+    assert {
+        ValidationIssueCode.BUDGET_TOKENS_EXCEEDED,
+        ValidationIssueCode.BUDGET_COST_EXCEEDED,
+        ValidationIssueCode.BUDGET_TOOL_CALLS_EXCEEDED,
+    } <= issue_codes(result)
+
+
+def test_semantic_error_keeps_reliable_graph_metrics() -> None:
+    request = planning_request(
+        remaining_budget=RemainingBudget(
+            duration_milliseconds=0,
+            tokens=10_000,
+            cost_microunits=100_000,
+            tool_calls=50,
+        )
+    )
+    payload = candidate_payload(request)
+    payload["tasks"][0]["required_capability_ids"] = ["browser"]
+    result = validate_payload(payload, request=request)
+    assert result.graph_depth == 2
+    assert result.topological_order == ("task_a", "task_b", "task_c")
+    assert ValidationIssueCode.BUDGET_DURATION_EXCEEDED in issue_codes(result)
+
+
+def test_output_id_is_explicit_unique_identity() -> None:
+    request = planning_request()
+    payload = candidate_payload(request)
+    payload["tasks"][0]["expected_outputs"].append(
+        {
+            "output_id": "sources",
+            "description": "A different description cannot redefine the ID",
+            "media_type": "text/plain",
+        }
+    )
+    result = validate_payload(payload, request=request)
+    assert ValidationIssueCode.DUPLICATE_EXPECTED_OUTPUT in issue_codes(result)
+
+
 def test_policy_task_dependency_depth_and_budget_limits() -> None:
     request = planning_request(
         policy=planning_policy(
@@ -178,6 +272,13 @@ def test_issue_order_topology_and_canonical_dag_hash_are_stable() -> None:
     request = planning_request()
     first_payload = candidate_payload(request)
     second_payload = candidate_payload(request)
+    extra_output = {
+        "output_id": "appendix",
+        "description": "Supporting appendix",
+        "media_type": "text/markdown",
+    }
+    first_payload["tasks"][0]["expected_outputs"].append(extra_output)
+    second_payload["tasks"][0]["expected_outputs"].insert(0, extra_output)
     second_payload["tasks"].reverse()
     second_payload["perspectives"].reverse()
     validator = DAGValidator()
@@ -194,3 +295,6 @@ def test_issue_order_topology_and_canonical_dag_hash_are_stable() -> None:
     )
     assert first_result.topological_order == second_result.topological_order
     assert model_sha256(first_dag) == model_sha256(second_dag)
+    assert [
+        output.output_id for output in first_dag.tasks[0].expected_outputs
+    ] == ["appendix", "sources"]

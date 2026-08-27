@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
 
 from researchos.domain.planning import (
@@ -25,8 +26,12 @@ def planning_request(**overrides: Any) -> PlanningRequest:
     values: dict[str, Any] = {
         "request_id": "preq_test",
         "run_id": "run_test",
+        "run_revision": 2,
         "plan_id": "plan_test",
         "query": "normalized query",
+        "source_policy_id": "sources_primary",
+        "output_format": "markdown",
+        "requested_at": datetime(2026, 8, 27, 9, 0, tzinfo=UTC),
         "allowed_capability_ids": ("search", "read"),
         "remaining_budget": RemainingBudget(
             duration_milliseconds=100_000,
@@ -71,7 +76,11 @@ def candidate_payload(request: PlanningRequest, **overrides: Any) -> dict[str, A
                 "dependencies": [],
                 "required_capability_ids": ["search"],
                 "expected_outputs": [
-                    {"name": "sources", "media_type": "application/json"}
+                    {
+                        "output_id": "sources",
+                        "description": "Primary source records",
+                        "media_type": "application/json",
+                    }
                 ],
                 "estimate": {
                     "duration_milliseconds": 1_000,
@@ -88,7 +97,11 @@ def candidate_payload(request: PlanningRequest, **overrides: Any) -> dict[str, A
                 "dependencies": [],
                 "required_capability_ids": ["read"],
                 "expected_outputs": [
-                    {"name": "risks", "media_type": "application/json"}
+                    {
+                        "output_id": "risks",
+                        "description": "Counterevidence and risks",
+                        "media_type": "application/json",
+                    }
                 ],
                 "estimate": {
                     "duration_milliseconds": 2_000,
@@ -105,7 +118,11 @@ def candidate_payload(request: PlanningRequest, **overrides: Any) -> dict[str, A
                 "dependencies": [{"task_id": "task_a"}],
                 "required_capability_ids": [],
                 "expected_outputs": [
-                    {"name": "comparison", "media_type": "text/markdown"}
+                    {
+                        "output_id": "comparison",
+                        "description": "Comparison of findings",
+                        "media_type": "text/markdown",
+                    }
                 ],
                 "estimate": {
                     "duration_milliseconds": 3_000,

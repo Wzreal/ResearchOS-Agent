@@ -250,3 +250,33 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   repair. Process restart loses the lineage registry by design. Durable replan
   accounting, DAG storage, runtime checkpoint/resume, and budget reservation
   are Phase 3 responsibilities.
+
+## ADR-0015: Make Phase 2 validation provenance and partial metrics explicit
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Review of the Phase 2 contracts found that partial graph metrics
+  could appear authoritative after unsafe structural failures, planning
+  requests omitted important run context, malformed Pydantic diagnostics could
+  retain candidate input, and expected outputs lacked stable identity.
+- **Decision:** `ValidationResult` exposes topological order, graph depth, and
+  critical-path duration only when the candidate graph is structurally safe.
+  Duplicate or invalid task IDs, unknown/self/duplicate dependencies, and
+  cycles suppress all three values and suppress duration-budget feasibility;
+  aggregate token, cost, and tool-call checks remain independent. Validation is
+  valid exactly when it contains no `ERROR` issue, so warnings do not invalidate
+  a candidate. Expected outputs use an explicit task-local unique `output_id`
+  and canonical ordering by that ID, plus description and media type.
+
+  Every `PlanningRequest` records run revision, source policy, output format,
+  and an injected-clock request timestamp. Planning results and validated DAGs
+  carry the same run revision, while trace events already record it in their
+  revision field. Candidate parse failures use Pydantic errors with input and
+  URLs excluded, then retain only allowlisted locations, stable error types,
+  and a constant sanitized message. Raw candidate input and provider responses
+  never enter validation issues or trace.
+- **Consequences:** Consumers can distinguish unavailable graph metrics from
+  zero-valued metrics and correlate a plan with its exact run snapshot without
+  adding persistence. Diagnostic detail is intentionally less verbose to
+  guarantee that malformed free text is not retained. Durable plan provenance,
+  persistence, and recovery remain Phase 3 work.
