@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
+from math import ceil
 from typing import Any
 from uuid import uuid4
 
@@ -15,7 +17,12 @@ from researchos.application.errors import (
     CheckpointCompatibilityError,
     RuntimePreconditionError,
 )
-from researchos.application.runtime_transitions import replace_task, stable_key
+from researchos.application.runtime_transitions import (
+    replace_task,
+    stable_key,
+    validate_attempt_transition,
+    validate_task_transition,
+)
 from researchos.domain.contracts import RunState, RunStatus, TraceEvent, TraceEventType
 from researchos.domain.planning import ReplanContext, ReplanRequest, TaskDAG
 from researchos.domain.runtime import (
@@ -50,6 +57,14 @@ from researchos.interfaces.runtime import (
 from researchos.security.redaction import PersistenceRedactor
 
 IdFactory = Callable[[str], str]
+
+
+@dataclass(frozen=True, slots=True)
+class _RunningDispatch:
+    sequence: int
+    task_id: str
+    policy: TaskRuntimePolicy
+    future: asyncio.Task[object]
 
 
 def _default_id_factory(prefix: str) -> str:
@@ -162,72 +177,16 @@ class AsyncDAGExecutor:
         policy_by_task = {
             item.task_id: item for item in checkpoint.execution_policy.tasks
         }
+        running: dict[asyncio.Task[object], _RunningDispatch] = {}
+        dispatch_sequence = 0
+        budget_breached = checkpoint.budget.breached
         while checkpoint.executor_status is ExecutorStatus.RUNNING:
             if self._cancellation.cancellation_requested:
-                checkpoint = self._apply_run_cancellation(checkpoint)
-                break
-            checkpoint = self._propagate_blocked(checkpoint)
-            checkpoint = self._mark_ready(checkpoint)
-            if all(
-                item.status in TASK_TERMINAL_STATUSES for item in checkpoint.task_states
-            ):
-                checkpoint = self._mutation(
-                    checkpoint,
-                    kind="executor_completed",
-                    executor_status=ExecutorStatus.COMPLETED,
-                    event_specs=[(TraceEventType.EXECUTOR_COMPLETED, {})],
-                )
-                break
-            ready = self._ordered_ready(checkpoint)
-            if not ready:
-                raise RuntimePreconditionError("runtime has no ready or running work")
-
-            dispatched: list[
-                tuple[int, TaskRuntimeState, TaskRuntimePolicy, asyncio.Task[object]]
-            ] = []
-            for sequence, task_state in enumerate(
-                ready[: checkpoint.execution_policy.max_concurrency]
-            ):
-                task_policy = policy_by_task[task_state.task_id]
-                if not task_policy.reservation.fits_within(
-                    checkpoint.budget.available()
-                ):
-                    continue
-                checkpoint, request = self._start_attempt(
-                    checkpoint, task_state, task_policy
-                )
-                future = asyncio.create_task(self._run_attempt(request, task_policy))
-                dispatched.append((sequence, task_state, task_policy, future))
-            if not dispatched:
-                checkpoint = self._mutation(
-                    checkpoint,
-                    kind="budget_exhausted",
-                    executor_status=ExecutorStatus.PAUSED,
-                    pause_reason=RuntimePauseReason.BUDGET_EXHAUSTED,
-                    event_specs=[
-                        (
-                            TraceEventType.EXECUTOR_PAUSED,
-                            {"reason": RuntimePauseReason.BUDGET_EXHAUSTED.value},
-                        )
-                    ],
-                )
-                break
-
-            results = await asyncio.gather(
-                *(item[3] for item in dispatched), return_exceptions=True
-            )
-            ordered = sorted(
-                zip(dispatched, results, strict=True),
-                key=lambda item: (item[0][0], item[0][1].task_id),
-            )
-            budget_breached = False
-            for (_, original_task, task_policy, _), result in ordered:
-                checkpoint = self._finish_attempt(
-                    checkpoint, original_task.task_id, task_policy, result
-                )
-                if checkpoint.budget.breached:
-                    budget_breached = True
-            if budget_breached:
+                checkpoint = self._begin_run_cancellation(checkpoint)
+                if not running:
+                    checkpoint = self._finalize_run_cancellation(checkpoint)
+                    break
+            if budget_breached and not running:
                 checkpoint = self._mutation(
                     checkpoint,
                     kind="budget_breached_pause",
@@ -242,7 +201,88 @@ class AsyncDAGExecutor:
                     ],
                 )
                 break
-            checkpoint = await self._release_retries(checkpoint)
+
+            checkpoint = self._promote_due_retries(checkpoint)
+            checkpoint = self._propagate_blocked(checkpoint)
+            checkpoint = self._mark_ready(checkpoint)
+            if all(
+                item.status in TASK_TERMINAL_STATUSES for item in checkpoint.task_states
+            ):
+                if self._cancellation.cancellation_requested:
+                    checkpoint = self._finalize_run_cancellation(checkpoint)
+                    break
+                checkpoint = self._mutation(
+                    checkpoint,
+                    kind="executor_completed",
+                    executor_status=ExecutorStatus.COMPLETED,
+                    event_specs=[(TraceEventType.EXECUTOR_COMPLETED, {})],
+                )
+                break
+
+            dispatched_any = False
+            if not self._cancellation.cancellation_requested and not budget_breached:
+                for task_state in self._ordered_ready(checkpoint):
+                    if len(running) >= checkpoint.execution_policy.max_concurrency:
+                        break
+                    task_policy = policy_by_task[task_state.task_id]
+                    if not task_policy.reservation.fits_within(
+                        checkpoint.budget.available()
+                    ):
+                        continue
+                    checkpoint, request = self._start_attempt(
+                        checkpoint, task_state, task_policy
+                    )
+                    future = asyncio.create_task(
+                        self._run_attempt(request, task_policy)
+                    )
+                    running[future] = _RunningDispatch(
+                        sequence=dispatch_sequence,
+                        task_id=task_state.task_id,
+                        policy=task_policy,
+                        future=future,
+                    )
+                    dispatch_sequence += 1
+                    dispatched_any = True
+
+            retry_delay = self._next_retry_delay(checkpoint)
+            if not running:
+                ready = self._ordered_ready(checkpoint)
+                if retry_delay is None:
+                    if ready and not dispatched_any:
+                        checkpoint = self._mutation(
+                            checkpoint,
+                            kind="budget_exhausted",
+                            executor_status=ExecutorStatus.PAUSED,
+                            pause_reason=RuntimePauseReason.BUDGET_EXHAUSTED,
+                            event_specs=[
+                                (
+                                    TraceEventType.EXECUTOR_PAUSED,
+                                    {
+                                        "reason": (
+                                            RuntimePauseReason.BUDGET_EXHAUSTED.value
+                                        )
+                                    },
+                                )
+                            ],
+                        )
+                        break
+                    if not ready:
+                        raise RuntimePreconditionError(
+                            "runtime has no ready, retry-wait, or running work"
+                        )
+
+            completed = await self._wait_for_progress(running, retry_delay)
+            for dispatch in completed:
+                running.pop(dispatch.future)
+                try:
+                    result: object = dispatch.future.result()
+                except BaseException as exc:  # backend/task boundary
+                    result = exc
+                checkpoint = self._finish_attempt(
+                    checkpoint, dispatch.task_id, dispatch.policy, result
+                )
+                if checkpoint.budget.breached:
+                    budget_breached = True
         return self._summary(checkpoint)
 
     def resume(self, state: RunState) -> RuntimeCheckpoint:
@@ -339,6 +379,7 @@ class AsyncDAGExecutor:
         task_state: TaskRuntimeState,
         policy: TaskRuntimePolicy,
     ) -> tuple[RuntimeCheckpoint, TaskExecutionRequest]:
+        validate_task_transition(task_state.status, TaskStatus.RUNNING)
         attempt_number = len(task_state.attempts) + 1
         operation_key = stable_key(
             {
@@ -513,6 +554,7 @@ class AsyncDAGExecutor:
                 "backend_receipt": result.backend_receipt,
             }
         )
+        validate_attempt_transition(attempt.status, status)
         attempts = task.attempts[:-1] + (settled_attempt,)
         retry_allowed = (
             not cancelled
@@ -536,6 +578,7 @@ class AsyncDAGExecutor:
         else:
             event_specs.append((TraceEventType.BUDGET_RELEASED, {"task_id": task_id}))
         if status is AttemptStatus.SUCCEEDED:
+            validate_task_transition(task.status, TaskStatus.SUCCEEDED)
             outcome = TaskOutcome(
                 task_id=task_id,
                 attempt_id=attempt.attempt_id,
@@ -557,16 +600,23 @@ class AsyncDAGExecutor:
                 ]
             )
         elif cancelled:
+            validate_task_transition(task.status, TaskStatus.CANCELLED)
             replacement = task.model_copy(
                 update={"status": TaskStatus.CANCELLED, "attempts": attempts}
             )
+            attempt_type = (
+                TraceEventType.ATTEMPT_TIMED_OUT
+                if status is AttemptStatus.TIMED_OUT
+                else TraceEventType.ATTEMPT_CANCELLED
+            )
             event_specs.extend(
                 [
-                    (TraceEventType.ATTEMPT_CANCELLED, {"task_id": task_id}),
+                    (attempt_type, {"task_id": task_id}),
                     (TraceEventType.TASK_CANCELLED, {"task_id": task_id}),
                 ]
             )
         elif retry_allowed:
+            validate_task_transition(task.status, TaskStatus.RETRY_WAIT)
             delay = policy.backoff_milliseconds[len(attempts) - 1]
             replacement = task.model_copy(
                 update={
@@ -590,6 +640,7 @@ class AsyncDAGExecutor:
                 ]
             )
         else:
+            validate_task_transition(task.status, TaskStatus.FAILED)
             replacement = task.model_copy(
                 update={"status": TaskStatus.FAILED, "attempts": attempts}
             )
@@ -638,25 +689,88 @@ class AsyncDAGExecutor:
             event_specs=event_specs,
         )
 
-    async def _release_retries(
+    def _promote_due_retries(
         self, checkpoint: RuntimeCheckpoint
     ) -> RuntimeCheckpoint:
-        for task in checkpoint.task_states:
-            if task.status is not TaskStatus.RETRY_WAIT:
-                continue
-            policy = self._policy(checkpoint, task.task_id)
-            delay = policy.backoff_milliseconds[len(task.attempts) - 1]
-            await self._sleeper.sleep(delay)
-            replacement = task.model_copy(
-                update={"status": TaskStatus.READY, "next_eligible_at": None}
+        now = self._clock.now()
+        replacements = list(checkpoint.task_states)
+        ready_ids: list[str] = []
+        for index, task in enumerate(replacements):
+            if (
+                task.status is TaskStatus.RETRY_WAIT
+                and task.next_eligible_at is not None
+                and task.next_eligible_at <= now
+            ):
+                validate_task_transition(task.status, TaskStatus.READY)
+                replacements[index] = task.model_copy(
+                    update={"status": TaskStatus.READY, "next_eligible_at": None}
+                )
+                ready_ids.append(task.task_id)
+        if not ready_ids:
+            return checkpoint
+        return self._mutation(
+            checkpoint,
+            kind="retries_ready",
+            task_states=tuple(replacements),
+            event_specs=[
+                (TraceEventType.TASK_READY, {"task_id": task_id})
+                for task_id in ready_ids
+            ],
+        )
+
+    def _next_retry_delay(self, checkpoint: RuntimeCheckpoint) -> int | None:
+        deadlines = [
+            task.next_eligible_at
+            for task in checkpoint.task_states
+            if task.status is TaskStatus.RETRY_WAIT
+            and task.next_eligible_at is not None
+        ]
+        if not deadlines:
+            return None
+        remaining = min(deadlines) - self._clock.now()
+        return max(0, ceil(remaining.total_seconds() * 1_000))
+
+    async def _wait_for_progress(
+        self,
+        running: dict[asyncio.Task[object], _RunningDispatch],
+        retry_delay: int | None,
+    ) -> list[_RunningDispatch]:
+        retry_task = (
+            asyncio.create_task(self._sleeper.sleep(retry_delay))
+            if retry_delay is not None
+            else None
+        )
+        waiters: set[asyncio.Task[object]] = set(running)
+        cancellation_task: asyncio.Task[object] | None = None
+        if not self._cancellation.cancellation_requested:
+            cancellation_task = asyncio.create_task(
+                self._cancellation.signal_for_attempt().wait()
             )
-            checkpoint = self._mutation(
-                checkpoint,
-                kind="retry_ready",
-                task_states=replace_task(checkpoint, replacement),
-                event_specs=[(TraceEventType.TASK_READY, {"task_id": task.task_id})],
+            waiters.add(cancellation_task)
+        if retry_task is not None:
+            waiters.add(retry_task)
+        auxiliary: set[asyncio.Task[object]] = set()
+        if cancellation_task is not None:
+            auxiliary.add(cancellation_task)
+        if retry_task is not None:
+            auxiliary.add(retry_task)
+        try:
+            done, _ = await asyncio.wait(
+                waiters, return_when=asyncio.FIRST_COMPLETED
             )
-        return checkpoint
+        except asyncio.CancelledError:
+            for task in auxiliary:
+                task.cancel()
+            for task in auxiliary:
+                with suppress(asyncio.CancelledError):
+                    await task
+            raise
+        for task in auxiliary - done:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        completed = [running[future] for future in done if future in running]
+        return sorted(completed, key=lambda item: (item.sequence, item.task_id))
 
     def _interrupt_attempt(
         self, checkpoint: RuntimeCheckpoint, task_id: str
@@ -675,11 +789,13 @@ class AsyncDAGExecutor:
                 "retryable": policy.idempotency is IdempotencyMode.IDEMPOTENT,
             }
         )
+        validate_attempt_transition(attempt.status, AttemptStatus.INTERRUPTED)
         can_retry = (
             policy.idempotency is IdempotencyMode.IDEMPOTENT
             and len(task.attempts) < policy.max_attempts
         )
         if can_retry:
+            validate_task_transition(task.status, TaskStatus.RETRY_WAIT)
             replacement = task.model_copy(
                 update={
                     "status": TaskStatus.RETRY_WAIT,
@@ -688,6 +804,7 @@ class AsyncDAGExecutor:
                 }
             )
         else:
+            validate_task_transition(task.status, TaskStatus.FAILED)
             replacement = task.model_copy(
                 update={
                     "status": TaskStatus.FAILED,
@@ -743,6 +860,7 @@ class AsyncDAGExecutor:
             if all(
                 statuses[item.task_id] is TaskStatus.SUCCEEDED for item in dependencies
             ):
+                validate_task_transition(state.status, TaskStatus.READY)
                 replacements[index] = state.model_copy(
                     update={"status": TaskStatus.READY}
                 )
@@ -778,6 +896,7 @@ class AsyncDAGExecutor:
                 }:
                     roots.add(dependency.task_id)
             if roots:
+                validate_task_transition(state.status, TaskStatus.BLOCKED)
                 states[task_id] = state.model_copy(
                     update={
                         "status": TaskStatus.BLOCKED,
@@ -804,9 +923,11 @@ class AsyncDAGExecutor:
             ],
         )
 
-    def _apply_run_cancellation(
+    def _begin_run_cancellation(
         self, checkpoint: RuntimeCheckpoint
     ) -> RuntimeCheckpoint:
+        if checkpoint.cancellation_requested_at is not None:
+            return checkpoint
         now = self._clock.now()
         states: list[TaskRuntimeState] = []
         events: list[tuple[TraceEventType, dict[str, Any]]] = [
@@ -818,6 +939,7 @@ class AsyncDAGExecutor:
                 TaskStatus.READY,
                 TaskStatus.RETRY_WAIT,
             }:
+                validate_task_transition(task.status, TaskStatus.CANCELLED)
                 states.append(
                     task.model_copy(
                         update={
@@ -831,16 +953,26 @@ class AsyncDAGExecutor:
                 )
             else:
                 states.append(task)
-        # Running attempts are only observed at batch boundaries in this
-        # coordinator. During dispatch, request_cancel merely sets their signal
-        # and they settle on backend return or their original timeout.
+        return self._mutation(
+            checkpoint,
+            kind="run_cancel_requested",
+            task_states=tuple(states),
+            cancellation_requested_at=now,
+            event_specs=events,
+        )
+
+    def _finalize_run_cancellation(
+        self, checkpoint: RuntimeCheckpoint
+    ) -> RuntimeCheckpoint:
+        if any(task.status is TaskStatus.RUNNING for task in checkpoint.task_states):
+            raise RuntimePreconditionError(
+                "cannot finalize cancellation while attempts are running"
+            )
         return self._mutation(
             checkpoint,
             kind="run_cancelled",
             executor_status=ExecutorStatus.CANCELLED,
-            task_states=tuple(states),
-            cancellation_requested_at=now,
-            event_specs=events,
+            event_specs=[],
         )
 
     def _ordered_ready(self, checkpoint: RuntimeCheckpoint) -> list[TaskRuntimeState]:

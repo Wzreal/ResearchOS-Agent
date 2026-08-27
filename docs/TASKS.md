@@ -52,6 +52,10 @@ not aspiration.
   restoration.
 - DONE — Add deterministic backend fixtures, fault-injection coverage, and a
   minimal Python 3.11 CI workflow.
+- DONE — Harden runtime replan consumption after restart, completion-driven
+  settlement, durable retry timing, full ready-budget scanning, strict runtime
+  transitions, and timeout/cancellation terminal-cause consistency after PR
+  audit.
 
 ## Phase 4 — Agent and tool adapters
 

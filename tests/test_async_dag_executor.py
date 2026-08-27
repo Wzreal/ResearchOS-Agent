@@ -140,7 +140,7 @@ def test_retry_reuses_operation_key_and_changes_attempt_key() -> None:
     assert len(task.attempts) == 2
     assert task.attempts[0].operation_key == task.attempts[1].operation_key
     assert task.attempts[0].attempt_key != task.attempts[1].attempt_key
-    assert 0 in sleeper.delays
+    assert len(sleeper.delays) >= 2
 
 
 def test_timeout_unknown_usage_is_uncertain_consumption() -> None:

@@ -5,6 +5,7 @@ from researchos.interfaces.planning import (
     Planner,
     PlanningModel,
     TrustedReplanLineageRestorer,
+    TrustedRuntimeReplanner,
 )
 from researchos.interfaces.runtime import (
     AsyncSleeper,
@@ -26,4 +27,5 @@ __all__ = [
     "TaskExecutionBackend",
     "TraceSink",
     "TrustedReplanLineageRestorer",
+    "TrustedRuntimeReplanner",
 ]

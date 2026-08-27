@@ -368,3 +368,44 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   across restart, and pending replan/accounting can survive a process. Applying
   a newly validated DAG, updating run lifecycle budget snapshots, and
   provider-backed reconciliation of uncertain consumption are deferred.
+
+## ADR-0019: Make Phase 3 scheduling progress and runtime replan consumption explicit
+
+- **Status:** Accepted
+- **Date:** 2026-08-27
+- **Context:** Phase 3 audit found that a restored runtime replan cursor could
+  not be consumed while the run remained `RUNNING`, batch settlement delayed a
+  fast sibling behind the slowest attempt, and retry/budget edge cases could
+  incorrectly report no work or budget exhaustion. Snapshot invariants alone
+  also did not state the legal runtime transition graph.
+- **Decision:** `PerspectivePlanner` exposes a narrow trusted-runtime replan
+  operation that accepts only `RUNNING` run state and an exact lineage cursor
+  previously installed by `restore_trusted_lineage`. It verifies run identity
+  and count limits, consumes the cursor before exactly one model call, returns
+  a genuine planning result, and neither applies a DAG nor changes run
+  lifecycle state.
+
+  The single-writer coordinator keeps an in-memory set of dispatched attempts
+  and waits for `FIRST_COMPLETED`. Simultaneous completions settle in stable
+  dispatch-sequence/task-ID order, but each completed attempt receives its own
+  checkpoint immediately and frees its slot before the ready set is recomputed.
+  Ready scanning examines the complete deterministic order until every slot is
+  filled or every candidate is unreservable. Budget exhaustion is declared
+  only with no running work, no retry that can become eligible, and no
+  reservable ready task.
+
+  `RETRY_WAIT` is a durable scheduler state. `next_eligible_at` is the sole
+  retry deadline: due retries become ready together, future retries cause one
+  wait for the earliest remaining interval, restart never reapplies the full
+  backoff, and run cancellation interrupts the wait. Explicit legal task and
+  attempt transition maps are checked before executor mutations. Attempt
+  terminal trace events follow the attempt's actual terminal cause; therefore
+  a timeout observed during run cancellation emits `ATTEMPT_TIMED_OUT` even
+  though the enclosing task becomes `CANCELLED`.
+- **Consequences:** Checkpoint progress is observable at attempt granularity,
+  durable retries retain their original schedule, independent affordable work
+  is not starved by expensive tasks, and restart can consume a pending runtime
+  replan without fabricating prior planning state. The live dispatch set is
+  intentionally process-local; checkpoint recovery still converts persisted
+  running attempts to interruption according to ADR-0018. Replacement-DAG
+  application and run lifecycle integration remain outside Phase 3.
