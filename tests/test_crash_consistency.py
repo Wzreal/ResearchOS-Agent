@@ -46,6 +46,83 @@ def manager_for(
     )
 
 
+def test_create_failure_after_state_replace_exposes_run_id(tmp_path: Path) -> None:
+    run_input = RunInput(query="query")
+    config = RunConfig()
+    failing = manager_for(
+        tmp_path,
+        store_fault=FailOccurrence("after_replace", 1),
+    )
+
+    with pytest.raises(StatePersistenceError) as captured:
+        failing.create(run_input, config)
+
+    assert captured.value.run_id == "run_1"
+    assert captured.value.state_replaced is True
+    persisted = FilesystemRunStore(tmp_path).load(captured.value.run_id)
+    assert persisted.run_id == captured.value.run_id
+    resumed = manager_for(tmp_path).resume(
+        captured.value.run_id,
+        expected_input=run_input,
+        expected_config=config,
+    )
+    assert resumed == persisted
+
+
+def test_create_failure_before_committed_append_exposes_run_id(
+    tmp_path: Path,
+) -> None:
+    run_input = RunInput(query="query")
+    config = RunConfig()
+    failing = manager_for(
+        tmp_path,
+        trace_fault=FailOccurrence("before_trace_append", 2),
+    )
+
+    with pytest.raises(TraceCommitError) as captured:
+        failing.create(run_input, config)
+
+    assert captured.value.run_id == "run_1"
+    assert captured.value.state_committed is True
+    persisted = FilesystemRunStore(tmp_path).load(captured.value.run_id)
+    assert persisted.last_transition_id == captured.value.transition_id
+    manager_for(tmp_path).resume(
+        captured.value.run_id,
+        expected_input=run_input,
+        expected_config=config,
+    )
+    reconciled = [
+        event
+        for event in FilesystemTraceSink(tmp_path).read(captured.value.run_id)
+        if event.event_type is TraceEventType.TRANSITION_RECONCILED
+    ]
+    assert len(reconciled) == 1
+
+
+def test_create_failure_during_committed_append_exposes_run_id(
+    tmp_path: Path,
+) -> None:
+    run_input = RunInput(query="query")
+    config = RunConfig()
+    failing = manager_for(
+        tmp_path,
+        trace_fault=FailOccurrence("after_trace_write", 2),
+    )
+
+    with pytest.raises(TraceCommitError) as captured:
+        failing.create(run_input, config)
+
+    assert captured.value.run_id == "run_1"
+    assert captured.value.state_committed is True
+    persisted = FilesystemRunStore(tmp_path).load(captured.value.run_id)
+    assert persisted.revision == captured.value.revision == 0
+    assert manager_for(tmp_path).resume(
+        captured.value.run_id,
+        expected_input=run_input,
+        expected_config=config,
+    ) == persisted
+
+
 def test_intent_without_state_commit_is_ignored(tmp_path: Path) -> None:
     manager = manager_for(tmp_path)
     run_input = RunInput(query="query")
@@ -86,6 +163,7 @@ def test_state_without_commit_is_reconciled_once(tmp_path: Path) -> None:
     with pytest.raises(TraceCommitError) as captured:
         failing.transition(state.run_id, RunStatus.PLANNING)
     assert captured.value.state_committed is True
+    assert captured.value.run_id == state.run_id
 
     recovery = manager_for(tmp_path)
     recovery.resume(

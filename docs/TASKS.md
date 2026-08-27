@@ -26,6 +26,8 @@ not aspiration.
 - DONE — Implement run create/load/transition/finalize/resume orchestration.
 - DONE — Add offline tests for invalid transitions, corruption, redaction, and
   real-mode configuration failure.
+- DONE — Harden create crash outcome reporting and persisted trace identity and
+  redaction integrity checks.
 
 ## Phase 2 — Planner and validated task DAG
 

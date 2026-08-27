@@ -18,6 +18,7 @@ from researchos.application.errors import (
     RunAlreadyExists,
     RunNotFound,
     StatePersistenceError,
+    UnsafePersistenceData,
 )
 from researchos.domain.contracts import (
     SCHEMA_VERSION,
@@ -80,7 +81,11 @@ class FilesystemRunStore(_FilesystemBase):
             path = self._run_dir(state.run_id) / self.state_filename
             if path.exists():
                 raise RunAlreadyExists(state.run_id)
-            self._atomic_write(path, canonical_json_bytes(state) + b"\n")
+            self._atomic_write(
+                path,
+                canonical_json_bytes(state) + b"\n",
+                run_id=state.run_id,
+            )
 
     def load(self, run_id: str) -> RunState:
         with self._lock:
@@ -121,9 +126,13 @@ class FilesystemRunStore(_FilesystemBase):
             if state.revision != expected_revision + 1:
                 raise RevisionConflict("new revision must increase by exactly one")
             path = self._run_dir(state.run_id) / self.state_filename
-            self._atomic_write(path, canonical_json_bytes(state) + b"\n")
+            self._atomic_write(
+                path,
+                canonical_json_bytes(state) + b"\n",
+                run_id=state.run_id,
+            )
 
-    def _atomic_write(self, path: Path, data: bytes) -> None:
+    def _atomic_write(self, path: Path, data: bytes, *, run_id: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
         replaced = False
@@ -144,7 +153,9 @@ class FilesystemRunStore(_FilesystemBase):
             self._fault("after_parent_fsync")
         except Exception as exc:
             raise StatePersistenceError(
-                "atomic state write failed", state_replaced=replaced
+                "atomic state write failed",
+                run_id=run_id,
+                state_replaced=replaced,
             ) from exc
         finally:
             if not replaced and temp_path.exists():
@@ -160,7 +171,11 @@ class FilesystemTraceSink(_FilesystemBase):
             run_dir = self._run_dir(event.run_id)
             run_dir.mkdir(parents=True, exist_ok=True)
             path = run_dir / self.trace_filename
-            self._read_path(path, recover_torn_tail=True)
+            self._read_path(
+                path,
+                expected_run_id=event.run_id,
+                recover_torn_tail=True,
+            )
             data = canonical_json_bytes(event) + b"\n"
             self._fault("before_trace_append")
             with path.open("ab") as handle:
@@ -176,10 +191,18 @@ class FilesystemTraceSink(_FilesystemBase):
     ) -> tuple[TraceEvent, ...]:
         with self._lock:
             path = self._run_dir(run_id) / self.trace_filename
-            return self._read_path(path, recover_torn_tail=recover_torn_tail)
+            return self._read_path(
+                path,
+                expected_run_id=run_id,
+                recover_torn_tail=recover_torn_tail,
+            )
 
     def _read_path(
-        self, path: Path, *, recover_torn_tail: bool
+        self,
+        path: Path,
+        *,
+        expected_run_id: str,
+        recover_torn_tail: bool,
     ) -> tuple[TraceEvent, ...]:
         if not path.exists():
             return ()
@@ -191,7 +214,7 @@ class FilesystemTraceSink(_FilesystemBase):
             last_newline = data.rfind(b"\n")
             complete_end = last_newline + 1
             complete = data[:complete_end]
-            self._parse_complete_lines(complete)
+            self._parse_complete_lines(complete, expected_run_id=expected_run_id)
             if not recover_torn_tail:
                 raise CorruptRunState("trace has a torn final event")
             self._fault("before_trace_tail_truncate")
@@ -201,10 +224,11 @@ class FilesystemTraceSink(_FilesystemBase):
                 os.fsync(handle.fileno())
             self._fault("after_trace_tail_fsync")
             data = complete
-        return self._parse_complete_lines(data)
+        return self._parse_complete_lines(data, expected_run_id=expected_run_id)
 
-    @staticmethod
-    def _parse_complete_lines(data: bytes) -> tuple[TraceEvent, ...]:
+    def _parse_complete_lines(
+        self, data: bytes, *, expected_run_id: str
+    ) -> tuple[TraceEvent, ...]:
         events: list[TraceEvent] = []
         for line_number, line in enumerate(data.splitlines(), start=1):
             if not line:
@@ -219,7 +243,19 @@ class FilesystemTraceSink(_FilesystemBase):
                     raise IncompatibleSchema(
                         f"unsupported trace schema {raw.get('schema_version')!r}"
                     )
-                events.append(TraceEvent.model_validate(raw))
+                event = TraceEvent.model_validate(raw)
+                if event.run_id != expected_run_id:
+                    raise CorruptRunState(
+                        f"trace line {line_number} belongs to run {event.run_id}, "
+                        f"expected {expected_run_id}"
+                    )
+                try:
+                    self._redactor.assert_safe_model(event)
+                except UnsafePersistenceData as exc:
+                    raise CorruptRunState(
+                        f"trace line {line_number} contains unsafe persisted data"
+                    ) from exc
+                events.append(event)
             except (CorruptRunState, IncompatibleSchema):
                 raise
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:

@@ -91,7 +91,6 @@ class TraceEventType(StrEnum):
     TRANSITION_COMMITTED = "run.transition_committed"
     TRANSITION_RECONCILED = "run.transition_reconciled"
     RESUMED = "run.resumed"
-    RESUME_REJECTED = "run.resume_rejected"
 
 
 class RunInput(ContractModel):

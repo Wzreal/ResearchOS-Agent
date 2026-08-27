@@ -275,9 +275,9 @@ class RunManager:
         except Exception as exc:
             raise TraceCommitError(
                 "state committed but transition_committed trace was not confirmed",
+                run_id=state.run_id,
                 transition_id=transition_id,
                 revision=state.revision,
-                state_committed=True,
             ) from exc
 
     def _reconcile(self, state: RunState) -> None:
