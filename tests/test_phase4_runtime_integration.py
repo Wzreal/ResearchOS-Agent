@@ -106,10 +106,18 @@ class CapabilityTool:
 
 
 def _final(output_id: str) -> AgentFinalDecision:
+    media_types = {
+        "sources": "application/json",
+        "risks": "application/json",
+        "comparison": "text/markdown",
+    }
     return AgentFinalDecision(
         final=AgentFinalResult(
             outputs=(
-                AgentProducedOutput(output_id=output_id, media_type="text/plain"),
+                AgentProducedOutput(
+                    output_id=output_id,
+                    media_type=media_types.get(output_id, "text/plain"),
+                ),
             )
         ),
         usage=RuntimeResourceAmount(tokens=1),
@@ -240,6 +248,31 @@ def test_phase3_agent_failure_and_expected_output_mismatch() -> None:
     assert summary.failed == 1
     assert task_a.attempts[0].failure_code == "agent_output_contract_violation"
 
+    media_example = runtime_example()
+    media_fixtures = _base_fixtures()
+    media_fixtures[AgentFixtureKey("task_b", 1, 1)] = AgentFixture(
+        decision=AgentFinalDecision(
+            final=AgentFinalResult(
+                outputs=(
+                    AgentProducedOutput(
+                        output_id="risks", media_type="text/plain"
+                    ),
+                )
+            ),
+            usage=RuntimeResourceAmount(tokens=1),
+            usage_certainty=UsageCertainty.EXACT,
+        )
+    )
+    executor, store, _, _, _, _ = _build(media_example, media_fixtures)
+    summary = asyncio.run(executor.execute(media_example.state))
+    task_b = next(
+        item
+        for item in store.load(media_example.state.run_id).task_states
+        if item.task_id == "task_b"
+    )
+    assert summary.failed == 1
+    assert task_b.attempts[0].failure_code == "agent_output_contract_violation"
+
 
 def test_phase3_owns_retry_and_tool_identity_survives_attempt_change() -> None:
     example = runtime_example(max_attempts=2)
@@ -323,3 +356,15 @@ def test_phase3_cancellation_reaches_agent_decisions() -> None:
         item.status in {TaskStatus.CANCELLED, TaskStatus.BLOCKED}
         for item in checkpoint.task_states
     )
+    cancelled_attempts = [
+        attempt
+        for item in checkpoint.task_states
+        if item.status is TaskStatus.CANCELLED
+        for attempt in item.attempts
+    ]
+    assert cancelled_attempts
+    assert all(
+        attempt.usage_certainty is UsageCertainty.UNKNOWN
+        for attempt in cancelled_attempts
+    )
+    assert checkpoint.budget.uncertain_consumption.tokens > 0

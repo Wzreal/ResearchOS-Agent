@@ -29,7 +29,12 @@ from researchos.domain.agent import (
     AgentObservation,
     AgentRequest,
 )
-from researchos.domain.contracts import TraceEvent, TraceEventType, model_sha256
+from researchos.domain.contracts import (
+    TraceEvent,
+    TraceEventType,
+    canonical_json_bytes,
+    model_sha256,
+)
 from researchos.domain.runtime import (
     IdempotencyMode,
     RuntimeResourceAmount,
@@ -56,6 +61,7 @@ class AgentRunnerPolicy(BaseModel):
     model_config = {"extra": "forbid", "frozen": True}
     max_agent_steps: int = Field(ge=1)
     max_tool_calls: int = Field(ge=0)
+    max_observation_bytes: int = Field(default=1_000_000, ge=1)
     trace_failure_retryable: bool = True
 
 
@@ -81,6 +87,9 @@ class _UsageAccumulator:
         if self.certainty is UsageCertainty.UNKNOWN:
             return None, self.certainty
         return self.amount, self.certainty
+
+    def mark_unknown(self) -> None:
+        self.certainty = UsageCertainty.UNKNOWN
 
 
 class AgentRunner:
@@ -170,16 +179,19 @@ class AgentRunner:
                 cancellation=cancellation,
             )
             if outcome == "cancelled":
+                usage.mark_unknown()
                 return self._failure(
                     "agent_cancelled", "agent decision was cancelled", usage
                 )
             if outcome == "timed_out":
+                usage.mark_unknown()
                 return self._failure(
                     "agent_decision_timed_out",
                     "agent decision exceeded the task deadline",
                     usage,
                 )
             if outcome == "error":
+                usage.mark_unknown()
                 code = (
                     "agent_malformed_decision"
                     if isinstance(value, AgentContractError)
@@ -414,7 +426,102 @@ class AgentRunner:
                 )
             else:
                 result = tool_value
+            if not isinstance(result, ToolInvocationResult):
+                usage.mark_unknown()
+                try:
+                    self._emit(
+                        context,
+                        TraceEventType.TOOL_INVOCATION_FAILED,
+                        correlation_id=invocation_id,
+                        causation_id=started.event_id,
+                        attributes={
+                            **self._tool_attributes(invocation, descriptor),
+                            "status": "contract_violation",
+                            "failure_code": "tool_output_contract_violation",
+                            "usage_certainty": UsageCertainty.UNKNOWN.value,
+                        },
+                    )
+                except AgentTraceError:
+                    return self._failure(
+                        "tool_trace_terminal_failed",
+                        "tool terminal trace could not be persisted after execution",
+                        usage,
+                        retryable=(
+                            self._policy.trace_failure_retryable
+                            and self._tool_retryable(context, descriptor)
+                        ),
+                    )
+                return self._failure(
+                    "tool_output_contract_violation",
+                    "tool returned an invalid result contract",
+                    usage,
+                    retryable=self._tool_retryable(context, descriptor),
+                )
             usage.add(_runtime_usage(result.usage), result.usage_certainty)
+            integrity_failure = self._tool_result_integrity_failure(
+                result, descriptor, operation_key
+            )
+            if integrity_failure is not None:
+                code, message = integrity_failure
+                try:
+                    self._emit(
+                        context,
+                        TraceEventType.TOOL_INVOCATION_FAILED,
+                        correlation_id=invocation_id,
+                        causation_id=started.event_id,
+                        attributes={
+                            **self._tool_attributes(invocation, descriptor),
+                            "status": "contract_violation",
+                            "failure_code": code,
+                            "usage_certainty": result.usage_certainty.value,
+                        },
+                    )
+                except AgentTraceError:
+                    return self._failure(
+                        "tool_trace_terminal_failed",
+                        "tool terminal trace could not be persisted after execution",
+                        usage,
+                        retryable=(
+                            self._policy.trace_failure_retryable
+                            and self._tool_retryable(context, descriptor)
+                        ),
+                    )
+                return self._failure(
+                    code,
+                    message,
+                    usage,
+                    retryable=self._tool_retryable(context, descriptor),
+                )
+            if len(canonical_json_bytes(result)) > self._policy.max_observation_bytes:
+                try:
+                    self._emit(
+                        context,
+                        TraceEventType.TOOL_INVOCATION_FAILED,
+                        correlation_id=invocation_id,
+                        causation_id=started.event_id,
+                        attributes={
+                            **self._tool_attributes(invocation, descriptor),
+                            "status": "result_too_large",
+                            "failure_code": "tool_result_too_large",
+                            "usage_certainty": result.usage_certainty.value,
+                        },
+                    )
+                except AgentTraceError:
+                    return self._failure(
+                        "tool_trace_terminal_failed",
+                        "tool terminal trace could not be persisted after execution",
+                        usage,
+                        retryable=(
+                            self._policy.trace_failure_retryable
+                            and self._tool_retryable(context, descriptor)
+                        ),
+                    )
+                return self._failure(
+                    "tool_result_too_large",
+                    "tool result exceeds the observation byte limit",
+                    usage,
+                    retryable=self._tool_retryable(context, descriptor),
+                )
             terminal_type = {
                 ToolInvocationStatus.SUCCEEDED: (
                     TraceEventType.TOOL_INVOCATION_SUCCEEDED
@@ -625,6 +732,38 @@ class AgentRunner:
             "adapter_id": descriptor.adapter_id,
             "schema_version": descriptor.schema_version,
         }
+
+    @staticmethod
+    def _tool_retryable(context, descriptor) -> bool:
+        return (
+            context.task_idempotency is IdempotencyMode.IDEMPOTENT
+            and descriptor.idempotency is IdempotencyMode.IDEMPOTENT
+        )
+
+    @staticmethod
+    def _tool_result_integrity_failure(result, descriptor, operation_key):
+        if result.status is ToolInvocationStatus.SUCCEEDED:
+            if result.output.output_type != descriptor.output_type:
+                return (
+                    "tool_output_contract_violation",
+                    "tool output does not match the resolved descriptor",
+                )
+            adapter_id = getattr(result.output, "adapter_id", None)
+            if adapter_id is not None and adapter_id != descriptor.adapter_id:
+                return (
+                    "tool_provenance_mismatch",
+                    "tool output adapter identity does not match the descriptor",
+                )
+        if any(
+            artifact.producer_tool_id != descriptor.tool_id
+            or artifact.tool_operation_key != operation_key
+            for artifact in result.artifacts
+        ):
+            return (
+                "tool_provenance_mismatch",
+                "tool artifact provenance does not match the invocation",
+            )
+        return None
 
 
 def _runtime_usage(usage):

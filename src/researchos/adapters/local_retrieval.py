@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
 import re
 import unicodedata
 from collections import Counter
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -30,6 +33,22 @@ from researchos.domain.tools import (
 )
 from researchos.interfaces.lifecycle import Clock
 from researchos.interfaces.runtime import CancellationSignal
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRetrievalPolicy:
+    max_corpus_bytes: int = 10_000_000
+    max_chunk_count: int = 100_000
+
+    def __post_init__(self) -> None:
+        if self.max_corpus_bytes < 1:
+            raise ValueError("max_corpus_bytes must be positive")
+        if self.max_chunk_count < 1:
+            raise ValueError("max_chunk_count must be positive")
+
+
+class _CorpusLimitExceeded(Exception):
+    pass
 
 
 class _CorpusChunk(BaseModel):
@@ -61,12 +80,14 @@ class LocalRetrievalTool:
         root: Path,
         corpus_path: str,
         clock: Clock,
+        policy: LocalRetrievalPolicy | None = None,
         tool_id: str = "local_retrieval",
         adapter_id: str = "stdlib_bm25",
     ) -> None:
         self._root = root.resolve()
         self._corpus_path = self._resolve_corpus(corpus_path)
         self._clock = clock
+        self._policy = policy or LocalRetrievalPolicy()
         self._descriptor = ToolDescriptor(
             tool_id=tool_id,
             capability_id="local_retrieval",
@@ -86,14 +107,76 @@ class LocalRetrievalTool:
         self, request: ToolInvocationRequest, cancellation: CancellationSignal
     ) -> ToolInvocationResult:
         if cancellation.cancelled:
-            return _failure("tool_cancelled", "retrieval was cancelled", "cancelled")
+            return _failure(
+                "tool_cancelled",
+                "retrieval was cancelled",
+                "cancelled",
+                dispatched=False,
+            )
         if not isinstance(request.input, LocalRetrievalRequest):
             return _failure("invalid_tool_input", "retrieval input is invalid")
+        remaining = (request.deadline - self._clock.now()).total_seconds()
+        if remaining <= 0:
+            return _failure(
+                "tool_timed_out",
+                "retrieval deadline was exhausted",
+                "timed_out",
+                dispatched=False,
+            )
+        worker = asyncio.create_task(asyncio.to_thread(self._retrieve, request.input))
+        cancelled = asyncio.create_task(cancellation.wait())
+        timed_out = asyncio.create_task(asyncio.sleep(remaining))
+        try:
+            done, _ = await asyncio.wait(
+                {worker, cancelled, timed_out}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if cancelled in done and worker not in done:
+                worker.cancel()
+                timed_out.cancel()
+                with suppress(asyncio.CancelledError):
+                    await timed_out
+                return _failure(
+                    "tool_cancelled",
+                    "retrieval was cancelled",
+                    "cancelled",
+                    dispatched=True,
+                )
+            if timed_out in done and worker not in done:
+                worker.cancel()
+                cancelled.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cancelled
+                return _failure(
+                    "tool_timed_out",
+                    "retrieval exceeded its deadline",
+                    "timed_out",
+                    dispatched=True,
+                )
+            cancelled.cancel()
+            timed_out.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancelled
+            with suppress(asyncio.CancelledError):
+                await timed_out
+            return worker.result()
+        except asyncio.CancelledError:
+            for task in (worker, cancelled, timed_out):
+                task.cancel()
+            for task in (worker, cancelled, timed_out):
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+            raise
+
+    def _retrieve(self, payload: LocalRetrievalRequest) -> ToolInvocationResult:
         try:
             chunks = self._load()
+        except _CorpusLimitExceeded:
+            return _failure(
+                "corpus_limit_exceeded", "local corpus exceeds retrieval policy"
+            )
         except MalformedCorpusError:
             return _failure("malformed_corpus", "local corpus is malformed")
-        query_tokens = _tokens(request.input.query)
+        query_tokens = _tokens(payload.query)
         ranked = _rank(chunks, query_tokens)
         hits = tuple(
             LocalRetrievalHit(
@@ -107,7 +190,7 @@ class LocalRetrievalTool:
                 score=score,
                 source_metadata=chunk.source_metadata,
             )
-            for score, chunk in ranked[: request.input.limit]
+            for score, chunk in ranked[: payload.limit]
         )
         return ToolInvocationResult(
             status=ToolInvocationStatus.SUCCEEDED,
@@ -140,13 +223,20 @@ class LocalRetrievalTool:
 
     def _load(self) -> tuple[_CorpusChunk, ...]:
         try:
-            lines = self._corpus_path.read_text(encoding="utf-8").splitlines()
+            if self._corpus_path.stat().st_size > self._policy.max_corpus_bytes:
+                raise _CorpusLimitExceeded
+            raw = self._corpus_path.read_bytes()
+            if len(raw) > self._policy.max_corpus_bytes:
+                raise _CorpusLimitExceeded
+            lines = raw.decode("utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
             raise MalformedCorpusError("cannot read local corpus") from exc
         chunks: list[_CorpusChunk] = []
         try:
             for line in lines:
                 if line.strip():
+                    if len(chunks) >= self._policy.max_chunk_count:
+                        raise _CorpusLimitExceeded
                     chunks.append(_CorpusChunk.model_validate(json.loads(line)))
         except (json.JSONDecodeError, ValidationError) as exc:
             raise MalformedCorpusError("invalid local corpus record") from exc
@@ -199,10 +289,17 @@ def _rank(
     return ranked
 
 
-def _failure(code: str, message: str, status: str = "failed"):
+def _failure(
+    code: str,
+    message: str,
+    status: str = "failed",
+    *,
+    dispatched: bool = True,
+):
+    usage_unknown = dispatched and status != "failed"
     return ToolInvocationResult(
         status=status,
         error=ToolError(code=code, message=message),
-        usage=ToolUsage(tool_calls=1),
-        usage_certainty="exact",
+        usage=None if usage_unknown else ToolUsage(tool_calls=int(dispatched)),
+        usage_certainty="unknown" if usage_unknown else "exact",
     )

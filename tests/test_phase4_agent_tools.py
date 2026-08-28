@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +13,10 @@ from pydantic import ValidationError
 
 from researchos.adapters.artifact_filesystem import FilesystemArtifactStore
 from researchos.adapters.artifact_memory import InMemoryArtifactStore
-from researchos.adapters.local_retrieval import LocalRetrievalTool
+from researchos.adapters.local_retrieval import (
+    LocalRetrievalPolicy,
+    LocalRetrievalTool,
+)
 from researchos.adapters.memory import InMemoryTraceSink
 from researchos.adapters.mock_agent import (
     AgentFixture,
@@ -24,6 +28,7 @@ from researchos.adapters.mock_tools import MockTool, ToolFixture, ToolFixtureKey
 from researchos.adapters.python_subprocess import (
     PythonSubprocessPolicy,
     PythonSubprocessTool,
+    _drain_stream,
 )
 from researchos.adapters.sleeper import AsyncioRunCancellationController
 from researchos.application.agent_runner import AgentRunner, AgentRunnerPolicy
@@ -46,7 +51,7 @@ from researchos.domain.agent import (
     AgentToolCall,
     AgentToolDecision,
 )
-from researchos.domain.contracts import TraceEventType
+from researchos.domain.contracts import TraceEventType, canonical_json_bytes
 from researchos.domain.planning import ExpectedOutput, ResearchTask
 from researchos.domain.runtime import (
     IdempotencyMode,
@@ -62,6 +67,7 @@ from researchos.domain.tools import (
     SearchHit,
     SearchRequest,
     SearchResult,
+    ToolArtifact,
     ToolDescriptor,
     ToolInvocationRequest,
     ToolInvocationResult,
@@ -140,6 +146,17 @@ class HangingSearchTool(RecordingSearchTool):
         await asyncio.Future()
 
 
+class FixedResultSearchTool(RecordingSearchTool):
+    def __init__(self, result: object) -> None:
+        super().__init__()
+        self._result = result
+
+    async def invoke(self, request, cancellation):
+        del cancellation
+        self.requests.append(request)
+        return self._result
+
+
 class PayloadSearchTool(RecordingSearchTool):
     async def invoke(self, request, cancellation):
         del cancellation
@@ -189,6 +206,12 @@ class DelayedFinalAgent:
             usage=_usage(),
             usage_certainty=UsageCertainty.EXACT,
         )
+
+
+class RaisingAgent(DelayedFinalAgent):
+    async def decide(self, request, cancellation):
+        del request, cancellation
+        raise RuntimeError("adapter failed")
 
 
 class FailOnTerminalTrace(InMemoryTraceSink):
@@ -302,6 +325,8 @@ def test_agent_never_returns_is_bounded_by_deadline() -> None:
     )
     assert result.error is not None
     assert result.error.code == "agent_decision_timed_out"
+    assert result.usage is None
+    assert result.usage_certainty is UsageCertainty.UNKNOWN
 
 
 def test_agent_direct_final_has_ordered_trace() -> None:
@@ -533,6 +558,8 @@ def test_cancellation_interrupts_agent_decision() -> None:
     result = asyncio.run(scenario())
     assert result.error is not None
     assert result.error.code == "agent_cancelled"
+    assert result.usage is None
+    assert result.usage_certainty is UsageCertainty.UNKNOWN
 
 
 def test_deadline_interrupts_a_decision_that_would_eventually_return() -> None:
@@ -550,6 +577,22 @@ def test_deadline_interrupts_a_decision_that_would_eventually_return() -> None:
     )
     assert result.error is not None
     assert result.error.code == "agent_decision_timed_out"
+    assert result.usage is None
+    assert result.usage_certainty is UsageCertainty.UNKNOWN
+
+
+def test_agent_adapter_exception_after_dispatch_has_unknown_usage() -> None:
+    clock = FrozenClock()
+    result = asyncio.run(
+        _runner(RaisingAgent(), RecordingSearchTool(), clock).run(
+            _context(clock),
+            AsyncioRunCancellationController().signal_for_attempt(),
+        )
+    )
+    assert result.error is not None
+    assert result.error.code == "agent_decision_failed"
+    assert result.usage is None
+    assert result.usage_certainty is UsageCertainty.UNKNOWN
 
 
 def test_tool_operation_key_ignores_attempt_and_tool_call_identity() -> None:
@@ -644,6 +687,127 @@ def test_tool_operation_key_changes_with_input_version_and_adapter() -> None:
     assert _capture_operation_key(query="different") != baseline
     assert _capture_operation_key(operation_version="v2") != baseline
     assert _capture_operation_key(adapter_id="other_adapter") != baseline
+
+
+@pytest.mark.parametrize(
+    ("tool_result", "expected_code"),
+    [
+        (
+            ToolInvocationResult(
+                status=ToolInvocationStatus.SUCCEEDED,
+                output=BrowserResult(
+                    adapter_id="mock_search",
+                    final_url="https://example.com",
+                    title="title",
+                    content="content",
+                    content_hash=HASH_A,
+                    retrieved_at=datetime.now(UTC),
+                ),
+                usage=ToolUsage(),
+                usage_certainty=UsageCertainty.EXACT,
+            ),
+            "tool_output_contract_violation",
+        ),
+        (
+            ToolInvocationResult(
+                status=ToolInvocationStatus.SUCCEEDED,
+                output=SearchResult(adapter_id="other_adapter", hits=()),
+                usage=ToolUsage(),
+                usage_certainty=UsageCertainty.EXACT,
+            ),
+            "tool_provenance_mismatch",
+        ),
+        *[
+            (
+                ToolInvocationResult(
+                    status=ToolInvocationStatus.SUCCEEDED,
+                    output=SearchResult(adapter_id="mock_search", hits=()),
+                    artifacts=(
+                        ToolArtifact(
+                            artifact_id="artifact_one",
+                            media_type="text/plain",
+                            relative_path="tools/value.txt",
+                            sha256=HASH_A,
+                            size_bytes=1,
+                            producer_tool_id=producer,
+                            tool_operation_key=operation_key,
+                        ),
+                    ),
+                    usage=ToolUsage(),
+                    usage_certainty=UsageCertainty.EXACT,
+                ),
+                "tool_provenance_mismatch",
+            )
+            for producer, operation_key in (
+                ("other_tool", HASH_A),
+                ("search_tool", HASH_B),
+            )
+        ],
+    ],
+)
+def test_tool_result_integrity_is_checked_before_observation(
+    tool_result: ToolInvocationResult, expected_code: str
+) -> None:
+    clock = FrozenClock()
+    agent = _tool_then_final_agent(first_usage=_usage(), final_usage=_usage())
+    result = asyncio.run(
+        _runner(agent, FixedResultSearchTool(tool_result), clock).run(
+            _context(clock),
+            AsyncioRunCancellationController().signal_for_attempt(),
+        )
+    )
+    assert result.error is not None
+    assert result.error.code == expected_code
+    assert result.error.retryable
+    assert len(agent.requests) == 1
+
+
+def test_unvalidated_tool_result_is_not_observed() -> None:
+    clock = FrozenClock()
+    agent = _tool_then_final_agent(first_usage=_usage(), final_usage=_usage())
+    result = asyncio.run(
+        _runner(agent, FixedResultSearchTool({"raw": "result"}), clock).run(
+            _context(clock),
+            AsyncioRunCancellationController().signal_for_attempt(),
+        )
+    )
+    assert result.error is not None
+    assert result.error.code == "tool_output_contract_violation"
+    assert result.usage is None
+    assert result.usage_certainty is UsageCertainty.UNKNOWN
+    assert len(agent.requests) == 1
+
+
+def test_observation_byte_limit_has_exact_boundary() -> None:
+    tool_result = ToolInvocationResult(
+        status=ToolInvocationStatus.SUCCEEDED,
+        output=SearchResult(adapter_id="mock_search", hits=()),
+        usage=ToolUsage(),
+        usage_certainty=UsageCertainty.EXACT,
+    )
+    size = len(canonical_json_bytes(tool_result))
+    for limit, succeeds in ((size, True), (size - 1, False)):
+        clock = FrozenClock()
+        result = asyncio.run(
+            _runner(
+                _tool_then_final_agent(first_usage=_usage(), final_usage=_usage()),
+                FixedResultSearchTool(tool_result),
+                clock,
+                policy=AgentRunnerPolicy(
+                    max_agent_steps=2,
+                    max_tool_calls=1,
+                    max_observation_bytes=limit,
+                ),
+            ).run(
+                _context(clock),
+                AsyncioRunCancellationController().signal_for_attempt(),
+            )
+        )
+        if succeeds:
+            assert result.status.value == "succeeded"
+        else:
+            assert result.error is not None
+            assert result.error.code == "tool_result_too_large"
 
 
 def test_registry_presence_does_not_grant_permission() -> None:
@@ -1260,11 +1424,137 @@ def test_local_retrieval_rejects_traversal_and_symlink_escape(
         )
 
 
-def test_python_syntax_runtime_and_output_limits() -> None:
-    tool = PythonSubprocessTool(
-        artifact_store=InMemoryArtifactStore(),
-        policy=PythonSubprocessPolicy(max_output_bytes=4),
+def test_local_retrieval_enforces_corpus_byte_and_chunk_limits(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus.jsonl"
+    row = json.dumps(
+        {
+            "document_id": "doc_one",
+            "chunk_id": "chunk_one",
+            "locator": "local:one",
+            "content": "alpha",
+        }
     )
+    corpus.write_text(row + "\n", encoding="utf-8")
+    byte_limited = LocalRetrievalTool(
+        root=tmp_path,
+        corpus_path="corpus.jsonl",
+        clock=FrozenClock(),
+        policy=LocalRetrievalPolicy(max_corpus_bytes=1),
+    )
+    result = asyncio.run(
+        byte_limited.invoke(
+            _invocation(LocalRetrievalRequest(query="alpha")),
+            AsyncioRunCancellationController().signal_for_attempt(),
+        )
+    )
+    assert result.error is not None
+    assert result.error.code == "corpus_limit_exceeded"
+
+    corpus.write_text(row + "\n" + row.replace("chunk_one", "chunk_two") + "\n")
+    chunk_limited = LocalRetrievalTool(
+        root=tmp_path,
+        corpus_path="corpus.jsonl",
+        clock=FrozenClock(),
+        policy=LocalRetrievalPolicy(max_chunk_count=1),
+    )
+    result = asyncio.run(
+        chunk_limited.invoke(
+            _invocation(LocalRetrievalRequest(query="alpha")),
+            AsyncioRunCancellationController().signal_for_attempt(),
+        )
+    )
+    assert result.error is not None
+    assert result.error.code == "corpus_limit_exceeded"
+
+
+def test_local_retrieval_worker_does_not_block_event_loop(tmp_path: Path) -> None:
+    (tmp_path / "corpus.jsonl").write_text("", encoding="utf-8")
+    tool = LocalRetrievalTool(
+        root=tmp_path, corpus_path="corpus.jsonl", clock=FrozenClock()
+    )
+    started = threading.Event()
+    release = threading.Event()
+    original = tool._retrieve
+
+    def slow(payload):
+        started.set()
+        release.wait()
+        return original(payload)
+
+    tool._retrieve = slow
+
+    async def scenario():
+        running = asyncio.create_task(
+            tool.invoke(
+                _invocation(LocalRetrievalRequest(query="alpha")),
+                AsyncioRunCancellationController().signal_for_attempt(),
+            )
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        marker = False
+
+        async def tick():
+            nonlocal marker
+            await asyncio.sleep(0)
+            marker = True
+
+        await asyncio.wait_for(tick(), 0.1)
+        release.set()
+        await running
+        return marker
+
+    assert asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cause", ["cancelled", "timed_out"])
+def test_local_retrieval_worker_is_bounded_by_outer_signal(
+    tmp_path: Path, cause: str
+) -> None:
+    (tmp_path / "corpus.jsonl").write_text("", encoding="utf-8")
+    clock = FrozenClock()
+    tool = LocalRetrievalTool(
+        root=tmp_path, corpus_path="corpus.jsonl", clock=clock
+    )
+    started = threading.Event()
+    release = threading.Event()
+    original = tool._retrieve
+
+    def slow(payload):
+        started.set()
+        release.wait()
+        return original(payload)
+
+    tool._retrieve = slow
+
+    async def scenario():
+        controller = AsyncioRunCancellationController()
+        invocation = _invocation(LocalRetrievalRequest(query="alpha"))
+        if cause == "timed_out":
+            invocation = invocation.model_copy(
+                update={"deadline": clock.now() + timedelta(milliseconds=10)}
+            )
+        running = asyncio.create_task(
+            tool.invoke(invocation, controller.signal_for_attempt())
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        if cause == "cancelled":
+            controller.request_cancel()
+        result = await running
+        release.set()
+        return result
+
+    result = asyncio.run(scenario())
+    assert result.status.value == cause
+    assert result.usage is None
+    assert result.usage_certainty is UsageCertainty.UNKNOWN
+
+
+def test_python_syntax_runtime_and_output_limits() -> None:
+    tool = PythonSubprocessTool(artifact_store=InMemoryArtifactStore())
     syntax = asyncio.run(
         tool.invoke(
             _invocation(PythonExecutionRequest(source="if:")),
@@ -1281,24 +1571,100 @@ def test_python_syntax_runtime_and_output_limits() -> None:
     )
     assert runtime.error is not None
     assert runtime.error.code == "python_process_failed"
-    bounded = asyncio.run(
-        tool.invoke(
-            _invocation(
-                PythonExecutionRequest(
-                    source=(
-                        "print('abcdef')\n"
-                        "print('uvwxyz', file=__import__('sys').stderr)"
-                    )
-                )
-            ),
+    bounded_tool = PythonSubprocessTool(
+        artifact_store=InMemoryArtifactStore(),
+        policy=PythonSubprocessPolicy(max_output_bytes=4),
+    )
+    for source in (
+        "print('abcdef')",
+        "print('uvwxyz', file=__import__('sys').stderr)",
+    ):
+        bounded = asyncio.run(
+            bounded_tool.invoke(
+                _invocation(PythonExecutionRequest(source=source)),
+                AsyncioRunCancellationController().signal_for_attempt(),
+            )
+        )
+        assert bounded.output is None
+        assert bounded.error is not None
+        assert bounded.error.code == "python_output_limit_exceeded"
+        assert bounded.usage_certainty is UsageCertainty.UNKNOWN
+
+
+def test_python_stream_drain_retains_at_most_the_hard_limit() -> None:
+    class Stream:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def read(self, limit):
+            del limit
+            self.calls += 1
+            return b"x" * 1_000_000
+
+    stream = Stream()
+    result = asyncio.run(_drain_stream(stream, 4))
+    assert result.exceeded
+    assert result.value == b"xxxx"
+    assert stream.calls == 1
+
+
+def test_python_output_limit_terminates_and_reaps_child(monkeypatch) -> None:
+    class Stream:
+        def __init__(self, process, value):
+            self.process = process
+            self.value = value
+
+        async def read(self, limit):
+            del limit
+            if self.value:
+                value, self.value = self.value, b""
+                return value
+            while self.process.returncode is None:
+                await asyncio.sleep(0)
+            return b""
+
+    class Process:
+        returncode = None
+        terminated = False
+        reaped = False
+
+        def __init__(self):
+            self.stdout = Stream(self, b"too much output")
+            self.stderr = Stream(self, b"")
+
+        async def wait(self):
+            while self.returncode is None:
+                await asyncio.sleep(0)
+            self.reaped = True
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -1
+
+        def kill(self):
+            self.returncode = -9
+
+    process = Process()
+
+    async def create(*args, **kwargs):
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    result = asyncio.run(
+        PythonSubprocessTool(
+            artifact_store=InMemoryArtifactStore(),
+            policy=PythonSubprocessPolicy(max_output_bytes=4),
+        ).invoke(
+            _invocation(PythonExecutionRequest(source="print('value')")),
             AsyncioRunCancellationController().signal_for_attempt(),
         )
     )
-    assert bounded.output is not None
-    assert len(bounded.output.stdout.encode()) <= 4
-    assert len(bounded.output.stderr.encode()) <= 4
-    assert bounded.output.stdout_truncated
-    assert bounded.output.stderr_truncated
+    assert result.error is not None
+    assert result.error.code == "python_output_limit_exceeded"
+    assert process.terminated
+    assert process.reaped
 
 
 def test_python_artifact_count_size_and_path_limits() -> None:
@@ -1345,8 +1711,20 @@ def test_python_environment_stdin_and_exec_shape_are_restricted(monkeypatch) -> 
     class Process:
         returncode = 0
 
-        async def communicate(self):
-            return b"ok", b""
+        class Stream:
+            def __init__(self, value):
+                self.value = value
+
+            async def read(self, limit):
+                del limit
+                value, self.value = self.value, b""
+                return value
+
+        stdout = Stream(b"ok")
+        stderr = Stream(b"")
+
+        async def wait(self):
+            return self.returncode
 
     async def create(*args, **kwargs):
         captured["args"] = args
@@ -1377,11 +1755,25 @@ def test_python_cancellation_terminates_child(monkeypatch) -> None:
         terminated = False
         killed = False
 
-        async def communicate(self):
+        class Stream:
+            def __init__(self, process):
+                self.process = process
+
+            async def read(self, limit):
+                del limit
+                while self.process.returncode is None:
+                    await asyncio.sleep(0)
+                return b""
+
+        def __init__(self):
+            self.stdout = self.Stream(self)
+            self.stderr = self.Stream(self)
+
+        async def wait(self):
             started.set()
             while self.returncode is None:
                 await asyncio.sleep(0)
-            return b"", b""
+            return self.returncode
 
         def terminate(self):
             self.terminated = True
@@ -1423,10 +1815,24 @@ def test_python_subprocess_timeout_is_enforced_by_agent_runner(monkeypatch) -> N
         returncode = None
         terminated = False
 
-        async def communicate(self):
+        class Stream:
+            def __init__(self, process):
+                self.process = process
+
+            async def read(self, limit):
+                del limit
+                while self.process.returncode is None:
+                    await asyncio.sleep(0)
+                return b""
+
+        def __init__(self):
+            self.stdout = self.Stream(self)
+            self.stderr = self.Stream(self)
+
+        async def wait(self):
             while self.returncode is None:
                 await asyncio.sleep(0)
-            return b"", b""
+            return self.returncode
 
         def terminate(self):
             self.terminated = True

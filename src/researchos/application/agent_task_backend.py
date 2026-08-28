@@ -46,11 +46,16 @@ class AgentTaskExecutionBackend:
                 backend_receipt=result.backend_receipt,
             )
         assert result.final is not None
-        produced = tuple(sorted(item.output_id for item in result.final.outputs))
-        expected = tuple(
-            sorted(item.output_id for item in request.task.expected_outputs)
-        )
-        if produced != expected:
+        produced_by_id = {item.output_id: item for item in result.final.outputs}
+        expected_by_id = {
+            item.output_id: item for item in request.task.expected_outputs
+        }
+        produced = tuple(sorted(produced_by_id))
+        if set(produced_by_id) != set(expected_by_id) or any(
+            produced_by_id[output_id].media_type
+            != expected_by_id[output_id].media_type
+            for output_id in produced_by_id.keys() & expected_by_id.keys()
+        ):
             return TaskExecutionResult(
                 status=ExecutionResultStatus.FAILED,
                 failure_code="agent_output_contract_violation",

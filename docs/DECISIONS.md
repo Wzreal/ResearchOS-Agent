@@ -453,8 +453,13 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   conservative settlement.
 
   Local retrieval is deterministic BM25 over a validated, root-confined JSONL
-  corpus. Python execution uses an isolated-interpreter subprocess, bounded
-  output and artifact count/size, disabled stdin, a sanitized minimal
+  corpus. Its read, parse, tokenize, and rank work runs in a bounded read-only
+  worker thread so the coordinator event loop can still observe cancellation
+  and deadlines. Corpus bytes and chunk count are capped. Cancelling the outer
+  invocation cannot forcibly stop a Python worker thread; the bounded,
+  side-effect-free worker may finish in the background. Python execution uses
+  an isolated-interpreter subprocess, concurrently drained stdout/stderr hard
+  caps, bounded artifact count/size, disabled stdin, a sanitized minimal
   environment, cooperative cancellation with terminate/kill cleanup, safe
   relative inputs, and explicit atomic artifact publication. It uses argument
   vector execution and never a shell. Its AST import allowlist is solely a
@@ -463,6 +468,23 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   filesystem, network, or native-code behavior, and complete cleanup of all
   descendant processes is not guaranteed on every platform. Only trusted code
   is allowed; container or VM isolation is deferred to Phase 9.
+
+  Once an Agent decision has been dispatched, timeout, cancellation, or an
+  adapter exception without explicit no-usage proof produces `UNKNOWN` usage.
+  Because the resource contract has one certainty for all dimensions, prior
+  known amounts cannot be represented together with an uncertain in-flight
+  call; the final amount is therefore absent and Phase 3 conservatively settles
+  the reservation. Before an Agent observes a successful Tool result, the
+  runner verifies output type, adapter identity where present, and artifact
+  producer/operation provenance. It also measures the canonical validated
+  result against an explicit observation byte cap and rejects oversize results
+  without truncation. These post-dispatch failures preserve honest Tool usage
+  and require both task and Tool idempotency for retryability.
+
+  The Phase 3 backend validates both expected output identity and media type.
+  Phase 4 does not claim that final `artifact_ids` exist in a complete artifact
+  manifest; artifact-reference-to-final-manifest integrity is deferred until a
+  later phase owns that manifest boundary.
 - **Consequences:** Phase 3 can execute a typed Agent backend without knowing
   provider or Tool details, retries keep stable logical Tool identity, and
   offline behavior covers local retrieval, Python, browser, and search

@@ -148,42 +148,78 @@ class PythonSubprocessTool:
                     "Python subprocess could not be started",
                     certainty=UsageCertainty.EXACT,
                 )
-            communicate = asyncio.create_task(process.communicate())
+            assert process.stdout is not None
+            assert process.stderr is not None
+            stdout_drain = asyncio.create_task(
+                _drain_stream(process.stdout, self._policy.max_output_bytes)
+            )
+            stderr_drain = asyncio.create_task(
+                _drain_stream(process.stderr, self._policy.max_output_bytes)
+            )
+            process_wait = asyncio.create_task(process.wait())
             cancelled = asyncio.create_task(cancellation.wait())
+            output_exceeded = asyncio.create_task(
+                _wait_for_output_limit(stdout_drain, stderr_drain)
+            )
             try:
                 done, _ = await asyncio.wait(
-                    {communicate, cancelled},
+                    {process_wait, cancelled, output_exceeded},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if cancelled in done and communicate not in done:
-                    await _terminate(process, communicate)
+                if cancelled in done and process_wait not in done:
+                    output_exceeded.cancel()
+                    await _terminate(process, process_wait)
+                    await _finish_drains(stdout_drain, stderr_drain)
+                    with suppress(asyncio.CancelledError):
+                        await output_exceeded
                     return _terminal(
                         ToolInvocationStatus.CANCELLED,
                         "tool_cancelled",
                         "Python execution was cancelled",
                         certainty=UsageCertainty.UNKNOWN,
                     )
+                if output_exceeded in done and output_exceeded.result():
+                    cancelled.cancel()
+                    await _terminate(process, process_wait)
+                    await _finish_drains(stdout_drain, stderr_drain)
+                    with suppress(asyncio.CancelledError):
+                        await cancelled
+                    return _terminal(
+                        ToolInvocationStatus.FAILED,
+                        "python_output_limit_exceeded",
+                        "Python output exceeded the configured byte limit",
+                        certainty=UsageCertainty.UNKNOWN,
+                    )
+                await process_wait
                 cancelled.cancel()
                 with suppress(asyncio.CancelledError):
                     await cancelled
-                stdout, stderr = communicate.result()
+                stdout_result, stderr_result = await asyncio.gather(
+                    stdout_drain, stderr_drain
+                )
+                output_exceeded.cancel()
+                with suppress(asyncio.CancelledError):
+                    await output_exceeded
+                if stdout_result.exceeded or stderr_result.exceeded:
+                    return _terminal(
+                        ToolInvocationStatus.FAILED,
+                        "python_output_limit_exceeded",
+                        "Python output exceeded the configured byte limit",
+                        certainty=UsageCertainty.UNKNOWN,
+                    )
             except asyncio.CancelledError:
                 cancelled.cancel()
-                await _terminate(process, communicate)
+                output_exceeded.cancel()
+                await _terminate(process, process_wait)
+                await _finish_drains(stdout_drain, stderr_drain)
                 raise
 
-            stdout_value, stdout_cut = _bounded_text(
-                stdout, self._policy.max_output_bytes
-            )
-            stderr_value, stderr_cut = _bounded_text(
-                stderr, self._policy.max_output_bytes
-            )
             output = PythonExecutionResult(
                 exit_code=process.returncode,
-                stdout=stdout_value,
-                stderr=stderr_value,
-                stdout_truncated=stdout_cut,
-                stderr_truncated=stderr_cut,
+                stdout=stdout_result.value.decode("utf-8", errors="replace"),
+                stderr=stderr_result.value.decode("utf-8", errors="replace"),
+                stdout_truncated=False,
+                stderr_truncated=False,
             )
             if process.returncode != 0:
                 return ToolInvocationResult(
@@ -275,23 +311,57 @@ def _validate_supported_code(source: str, allowed: frozenset[str]) -> None:
                 raise ValueError("import is outside supported-code policy")
 
 
+@dataclass(frozen=True, slots=True)
+class _DrainResult:
+    value: bytes
+    exceeded: bool
+
+
+async def _drain_stream(
+    stream: asyncio.StreamReader, limit: int
+) -> _DrainResult:
+    retained = bytearray()
+    while True:
+        chunk = await stream.read(8_192)
+        if not chunk:
+            return _DrainResult(bytes(retained), False)
+        remaining = limit - len(retained)
+        if len(chunk) > remaining:
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+            return _DrainResult(bytes(retained), True)
+        retained.extend(chunk)
+
+
+async def _wait_for_output_limit(
+    stdout: asyncio.Task[_DrainResult], stderr: asyncio.Task[_DrainResult]
+) -> bool:
+    pending = {stdout, stderr}
+    while pending:
+        done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+        if any(item.result().exceeded for item in done):
+            return True
+    return False
+
+
+async def _finish_drains(*drains: asyncio.Task[_DrainResult]) -> None:
+    await asyncio.gather(*drains, return_exceptions=True)
+
+
 async def _terminate(
     process: asyncio.subprocess.Process,
-    communicate: asyncio.Task[tuple[bytes, bytes]],
+    process_wait: asyncio.Task[int],
 ) -> None:
     if process.returncode is None:
         process.terminate()
     try:
-        await asyncio.wait_for(communicate, timeout=1.0)
+        await asyncio.wait_for(asyncio.shield(process_wait), timeout=1.0)
     except TimeoutError:
         if process.returncode is None:
             process.kill()
-        await communicate
-
-
-def _bounded_text(value: bytes, limit: int) -> tuple[str, bool]:
-    truncated = len(value) > limit
-    return value[:limit].decode("utf-8", errors="replace"), truncated
+        await process_wait
 
 
 def _minimal_environment() -> dict[str, str]:

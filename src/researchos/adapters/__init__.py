@@ -6,7 +6,7 @@ from researchos.adapters.checkpoint_filesystem import FilesystemCheckpointStore
 from researchos.adapters.checkpoint_memory import InMemoryCheckpointStore
 from researchos.adapters.clock import SystemClock
 from researchos.adapters.filesystem import FilesystemRunStore, FilesystemTraceSink
-from researchos.adapters.local_retrieval import LocalRetrievalTool
+from researchos.adapters.local_retrieval import LocalRetrievalPolicy, LocalRetrievalTool
 from researchos.adapters.memory import InMemoryRunStore, InMemoryTraceSink
 from researchos.adapters.mock_agent import (
     AgentFixture,
@@ -56,6 +56,7 @@ __all__ = [
     "ToolFixtureAction",
     "ToolFixtureKey",
     "LocalRetrievalTool",
+    "LocalRetrievalPolicy",
     "PythonSubprocessPolicy",
     "PythonSubprocessTool",
     "PlanningFixtureKey",
