@@ -1,5 +1,6 @@
 """Domain-facing interfaces."""
 
+from researchos.interfaces.agent import Agent
 from researchos.interfaces.lifecycle import Clock, RunStore, TraceSink
 from researchos.interfaces.planning import (
     Planner,
@@ -14,9 +15,12 @@ from researchos.interfaces.runtime import (
     RunCancellationController,
     TaskExecutionBackend,
 )
+from researchos.interfaces.tools import ArtifactStore, Tool
 
 __all__ = [
     "AsyncSleeper",
+    "Agent",
+    "ArtifactStore",
     "CancellationSignal",
     "CheckpointStore",
     "Clock",
@@ -26,6 +30,7 @@ __all__ = [
     "RunStore",
     "TaskExecutionBackend",
     "TraceSink",
+    "Tool",
     "TrustedReplanLineageRestorer",
     "TrustedRuntimeReplanner",
 ]

@@ -125,6 +125,17 @@ class TraceEventType(StrEnum):
     BUDGET_BREACHED = "runtime.budget_breached"
     RUNTIME_REPLAN_REQUESTED = "runtime.replan_requested"
     RUNTIME_REPLAN_REJECTED = "runtime.replan_rejected"
+    AGENT_STARTED = "agent.started"
+    AGENT_DECISION = "agent.decision"
+    AGENT_TOOL_REQUESTED = "agent.tool_requested"
+    AGENT_COMPLETED = "agent.completed"
+    AGENT_FAILED = "agent.failed"
+    TOOL_INVOCATION_STARTED = "tool.invocation_started"
+    TOOL_INVOCATION_SUCCEEDED = "tool.invocation_succeeded"
+    TOOL_INVOCATION_FAILED = "tool.invocation_failed"
+    TOOL_INVOCATION_CANCELLED = "tool.invocation_cancelled"
+    TOOL_INVOCATION_TIMED_OUT = "tool.invocation_timed_out"
+    TOOL_PERMISSION_DENIED = "tool.permission_denied"
 
 
 class RunInput(ContractModel):

@@ -570,6 +570,7 @@ class TaskExecutionRequest(ContractModel):
     operation_key: Sha256
     attempt_key: Sha256
     operation_version: str
+    task_idempotency: IdempotencyMode = IdempotencyMode.IDEMPOTENT
     deadline: datetime
     hard_limits: RuntimeResourceAmount
     prior_backend_receipt: SafeId | None = None

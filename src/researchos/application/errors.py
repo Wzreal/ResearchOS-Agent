@@ -126,3 +126,35 @@ class RuntimeTraceCommitError(ResearchOSError):
 
 class ReplanLineageConflict(ResearchOSError):
     pass
+
+
+class CapabilityConfigurationError(ResearchOSError):
+    pass
+
+
+class UnknownCapabilityError(ResearchOSError):
+    pass
+
+
+class ToolPermissionDenied(ResearchOSError):
+    pass
+
+
+class AgentContractError(ResearchOSError):
+    pass
+
+
+class AgentTraceError(ResearchOSError):
+    pass
+
+
+class ArtifactConflictError(ResearchOSError):
+    pass
+
+
+class MalformedCorpusError(ResearchOSError):
+    pass
+
+
+class SandboxUnavailableError(ResearchOSError):
+    pass
