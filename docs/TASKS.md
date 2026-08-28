@@ -59,11 +59,22 @@ not aspiration.
 
 ## Phase 4 — Agent and tool adapters
 
-- TODO — Define typed Agent and Tool protocols and capability registry.
-- TODO — Add deterministic mock adapters with controllable failures.
-- TODO — Add local retrieval and sandboxed Python adapters.
-- TODO — Add browser/search adapter contracts; real integration remains gated.
-- TODO — Test permissions, timeouts, artifacts, and no-fallback behavior.
+- DONE — Define typed asynchronous Agent and Tool protocols, bounded
+  `AgentRunner`, Phase 3 backend bridge, and default-deny capability registry.
+- DONE — Add deterministic exact-fixture Agent and Tool adapters with
+  controllable failure, cancellation, and non-return behavior.
+- DONE — Add deterministic local BM25 retrieval and trusted-code bounded Python
+  subprocess adapters with explicit artifact publication.
+- DONE — Add browser/search typed contracts and generic offline Tool fixtures;
+  real provider integration remains gated to Phase 9.
+- DONE — Test authorization, independent Agent/Tool deadlines and cancellation,
+  hard limits, stable operation identity, trace failures, artifacts, adapter
+  mode validation, and no-fallback behavior.
+- DONE — Complete the Phase 4 GitHub reference and independent test-coverage
+  audits without expanding into Phase 5 or real providers.
+- DONE — Harden in-flight Agent usage certainty, Tool result/provenance and
+  observation bounds, streaming Python output limits, non-blocking bounded
+  local retrieval, and final output media-type validation after PR audit.
 
 ## Phase 5 — Evidence Memory and Claim-Evidence Graph
 

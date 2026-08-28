@@ -457,6 +457,7 @@ class AsyncDAGExecutor:
             operation_key=operation_key,
             attempt_key=attempt_key,
             operation_version=policy.operation_version,
+            task_idempotency=policy.idempotency,
             deadline=now + timedelta(milliseconds=policy.timeout_milliseconds),
             hard_limits=policy.reservation,
             prior_backend_receipt=previous_receipts[-1] if previous_receipts else None,

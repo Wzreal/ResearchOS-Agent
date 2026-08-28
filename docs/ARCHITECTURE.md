@@ -156,6 +156,27 @@ cross-cutting requirements are:
 Mocks reproduce contracts, latency/failure controls, and fixtures. They do not
 silently replace real adapters.
 
+Phase 4 implements this boundary through an asynchronous `Agent` decision
+port, a one-invocation `Tool` port, a default-deny capability registry, and an
+`AgentRunner` that bridges the Phase 3 `TaskExecutionBackend`. Each Agent or
+Tool await races the attempt deadline and cancellation signal. The runner
+maintains one local usage accumulator and enforces task hard limits; Phase 3
+remains the only durable budget owner.
+
+Tool logical identity is independent of model-generated call identity. It is a
+canonical hash of the task operation key, Agent step, capability, Tool and
+adapter IDs, Tool operation version, and safe canonical input hash. The model's
+`tool_call_id` is correlation metadata only. Agent/Tool semantic events append
+directly to the trace sink and fail closed; Phase 4 adds neither a second
+checkpoint outbox nor a durable Tool journal.
+
+The local retrieval adapter uses deterministic stdlib BM25 over a validated
+JSONL corpus. The Python adapter runs trusted supported code in a bounded
+subprocess and publishes only declared artifacts through an atomic store. Its
+import allowlist is a compatibility policy, not a hostile-code security
+boundary. Browser and search are provider-independent typed contracts with
+exact offline fixtures; real adapters remain gated.
+
 ### 5. Retriever
 
 Retrieval is a domain capability with adapters for local corpora and later

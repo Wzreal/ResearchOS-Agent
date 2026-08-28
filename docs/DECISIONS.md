@@ -409,3 +409,87 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   intentionally process-local; checkpoint recovery still converts persisted
   running attempts to interruption according to ADR-0018. Replacement-DAG
   application and run lifecycle integration remain outside Phase 3.
+
+## ADR-0020: Bound Agent decisions and use explicit capability adapters
+
+- **Status:** Accepted
+- **Date:** 2026-08-28
+- **Context:** Phase 4 must connect the durable Phase 3 task backend to Agent
+  decisions and local Tools without giving models authority over permissions,
+  idempotency identity, timeouts, or budget settlement. Tool execution may
+  finish before its terminal trace append, while a Python subprocess cannot be
+  treated as a security boundary merely because its duration and imports are
+  bounded.
+- **Decision:** The Agent port is asynchronous and receives the same read-only
+  per-attempt cancellation signal as Tool invocations. `AgentRunner` races each
+  Agent decision and Tool invocation independently against cancellation and the
+  attempt deadline. Non-returning, cancelled, and deadline-exceeded decisions
+  have distinct stable failures. The loop has explicit Agent-step and
+  Tool-call bounds and maintains one local duration/token/cost/Tool-call usage
+  accumulator. The effective Tool-call limit is the minimum of runner policy
+  and task hard limit. Known usage is retained without clamping when it exceeds
+  a limit; Phase 3 remains the only durable budget ledger and settles the
+  reported breach.
+
+  Capability registration and authorization are separate checks. Exactly one
+  active Tool is registered per capability, enabled adapter modes are
+  validated at composition time, and the requested capability must occur
+  exactly in `ResearchTask.required_capability_ids`. Registry existence never
+  grants permission and there is no real-to-mock fallback. Mock Agent/Tool
+  adapters reject descriptors claiming any mode other than `MOCK`. Phase 4
+  does not carry a second `RunConfig`; Phase 2 remains responsible for proving
+  required capabilities are allowed by the run.
+
+  A Tool logical operation key hashes the Phase 3 task operation key, Agent
+  step, capability ID, Tool ID, adapter ID, Tool operation version, and the
+  canonical hash of persistence-safe input. Model-provided `tool_call_id` is
+  only trace correlation and is excluded, so retrying the same task operation
+  yields the same Tool key. Phase 4 adds no generic durable deduplication
+  journal and no Tool retry loop. Automatic retry after a Tool has executed but
+  its terminal trace append failed is permitted only when task idempotency,
+  Tool idempotency, and the trace-failure policy all allow it. Actual known
+  usage is preserved, side effects are not rolled back, and the failure uses a
+  stable code. Unknown timeout/cancellation usage remains `UNKNOWN` for Phase 3
+  conservative settlement.
+
+  Local retrieval is deterministic BM25 over a validated, root-confined JSONL
+  corpus. Its read, parse, tokenize, and rank work runs in a bounded read-only
+  worker thread so the coordinator event loop can still observe cancellation
+  and deadlines. Corpus bytes and chunk count are capped. Cancelling the outer
+  invocation cannot forcibly stop a Python worker thread; the bounded,
+  side-effect-free worker may finish in the background. Python execution uses
+  an isolated-interpreter subprocess, concurrently drained stdout/stderr hard
+  caps, bounded artifact count/size, disabled stdin, a sanitized minimal
+  environment, cooperative cancellation with terminate/kill cleanup, safe
+  relative inputs, and explicit atomic artifact publication. It uses argument
+  vector execution and never a shell. Its AST import allowlist is solely a
+  supported-code policy and accidental-misuse guard. A bounded Python
+  subprocess is not a secure hostile-code sandbox: it cannot prevent arbitrary
+  filesystem, network, or native-code behavior, and complete cleanup of all
+  descendant processes is not guaranteed on every platform. Only trusted code
+  is allowed; container or VM isolation is deferred to Phase 9.
+
+  Once an Agent decision has been dispatched, timeout, cancellation, or an
+  adapter exception without explicit no-usage proof produces `UNKNOWN` usage.
+  Because the resource contract has one certainty for all dimensions, prior
+  known amounts cannot be represented together with an uncertain in-flight
+  call; the final amount is therefore absent and Phase 3 conservatively settles
+  the reservation. Before an Agent observes a successful Tool result, the
+  runner verifies output type, adapter identity where present, and artifact
+  producer/operation provenance. It also measures the canonical validated
+  result against an explicit observation byte cap and rejects oversize results
+  without truncation. These post-dispatch failures preserve honest Tool usage
+  and require both task and Tool idempotency for retryability.
+
+  The Phase 3 backend validates both expected output identity and media type.
+  Phase 4 does not claim that final `artifact_ids` exist in a complete artifact
+  manifest; artifact-reference-to-final-manifest integrity is deferred until a
+  later phase owns that manifest boundary.
+- **Consequences:** Phase 3 can execute a typed Agent backend without knowing
+  provider or Tool details, retries keep stable logical Tool identity, and
+  offline behavior covers local retrieval, Python, browser, and search
+  contracts without fabricated real integrations. Agent/Tool semantic traces
+  are not placed in the Phase 3 checkpoint outbox; a terminal append failure is
+  explicit but Phase 4 provides no cross-process exactly-once guarantee.
+  Durable Tool deduplication, real LLM/browser/search providers, hostile-code
+  isolation, Evidence Memory, claims, and synthesis remain later-phase work.
