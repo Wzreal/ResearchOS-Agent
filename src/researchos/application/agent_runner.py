@@ -69,6 +69,7 @@ class _UsageAccumulator:
     def __init__(self) -> None:
         self.amount = RuntimeResourceAmount()
         self.certainty = UsageCertainty.EXACT
+        self.observations: list[AgentObservation] = []
 
     def add(
         self, amount: RuntimeResourceAmount | None, certainty: UsageCertainty
@@ -137,7 +138,7 @@ class AgentRunner:
         self, context: AgentContext, cancellation: CancellationSignal
     ) -> AgentExecutionResult:
         usage = _UsageAccumulator()
-        observations: list[AgentObservation] = []
+        observations = usage.observations
         effective_tool_limit = min(
             self._policy.max_tool_calls, context.hard_limits.tool_calls
         )
@@ -261,8 +262,7 @@ class AgentRunner:
                         usage,
                         retryable=(
                             self._policy.trace_failure_retryable
-                            and context.task_idempotency
-                            is IdempotencyMode.IDEMPOTENT
+                            and context.task_idempotency is IdempotencyMode.IDEMPOTENT
                         ),
                     )
                 amount, certainty = usage.values()
@@ -272,6 +272,7 @@ class AgentRunner:
                     usage=amount,
                     usage_certainty=certainty,
                     backend_receipt=f"agent_{context.task_attempt_key[:32]}",
+                    observations=tuple(observations),
                 )
             if decision.kind is AgentDecisionKind.FAILED:
                 return self._failure(
@@ -403,10 +404,8 @@ class AgentRunner:
                         _unknown_usage(),
                         retryable=(
                             self._policy.trace_failure_retryable
-                            and context.task_idempotency
-                            is IdempotencyMode.IDEMPOTENT
-                            and descriptor.idempotency
-                            is IdempotencyMode.IDEMPOTENT
+                            and context.task_idempotency is IdempotencyMode.IDEMPOTENT
+                            and descriptor.idempotency is IdempotencyMode.IDEMPOTENT
                         ),
                     )
                 return self._failure(
@@ -558,6 +557,18 @@ class AgentRunner:
                         and descriptor.idempotency is IdempotencyMode.IDEMPOTENT
                     ),
                 )
+            observation = AgentObservation(
+                agent_step=step,
+                tool_call_id=tool_call.tool_call_id,
+                capability_id=descriptor.capability_id,
+                tool_id=descriptor.tool_id,
+                adapter_id=descriptor.adapter_id,
+                tool_input_hash=input_hash,
+                tool_operation_key=operation_key,
+                result=result,
+            )
+            if result.status is ToolInvocationStatus.SUCCEEDED:
+                observations.append(observation)
             if usage.certainty is UsageCertainty.UNKNOWN:
                 return self._failure(
                     "tool_usage_unknown",
@@ -579,17 +590,8 @@ class AgentRunner:
                     result.error.message,
                     usage,
                 )
-            observations.append(
-                AgentObservation(
-                    agent_step=step,
-                    tool_call_id=tool_call.tool_call_id,
-                    capability_id=descriptor.capability_id,
-                    tool_id=descriptor.tool_id,
-                    adapter_id=descriptor.adapter_id,
-                    tool_operation_key=operation_key,
-                    result=result,
-                )
-            )
+            if result.status is not ToolInvocationStatus.SUCCEEDED:
+                observations.append(observation)
             previous_event = terminal
 
         return self._failure(
@@ -682,6 +684,7 @@ class AgentRunner:
             error=AgentError(code=code, message=message, retryable=retryable),
             usage=amount,
             usage_certainty=certainty,
+            observations=tuple(usage.observations),
         )
 
     def _emit(

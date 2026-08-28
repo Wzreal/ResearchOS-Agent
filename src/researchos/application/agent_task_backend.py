@@ -4,15 +4,23 @@ from researchos.application.agent_runner import AgentRunner
 from researchos.domain.agent import AgentContext, AgentExecutionStatus
 from researchos.domain.runtime import (
     ExecutionResultStatus,
+    IdempotencyMode,
     TaskExecutionRequest,
     TaskExecutionResult,
 )
+from researchos.interfaces.evidence import EvidenceObservationIngestor
 from researchos.interfaces.runtime import CancellationSignal
 
 
 class AgentTaskExecutionBackend:
-    def __init__(self, runner: AgentRunner) -> None:
+    def __init__(
+        self,
+        runner: AgentRunner,
+        *,
+        evidence_ingestor: EvidenceObservationIngestor | None = None,
+    ) -> None:
         self._runner = runner
+        self._evidence_ingestor = evidence_ingestor
 
     async def execute(
         self, request: TaskExecutionRequest, cancellation: CancellationSignal
@@ -35,6 +43,21 @@ class AgentTaskExecutionBackend:
             authorized_capability_ids=request.task.required_capability_ids,
         )
         result = await self._runner.run(context, cancellation)
+        if self._evidence_ingestor is not None:
+            try:
+                for observation in result.observations:
+                    await self._evidence_ingestor.ingest_observation(
+                        context, observation
+                    )
+            except Exception:
+                return TaskExecutionResult(
+                    status=ExecutionResultStatus.FAILED,
+                    failure_code="evidence_ingestion_failed",
+                    retryable=(request.task_idempotency is IdempotencyMode.IDEMPOTENT),
+                    usage=result.usage,
+                    usage_certainty=result.usage_certainty,
+                    backend_receipt=result.backend_receipt,
+                )
         if result.status is AgentExecutionStatus.FAILED:
             assert result.error is not None
             return TaskExecutionResult(
@@ -52,8 +75,7 @@ class AgentTaskExecutionBackend:
         }
         produced = tuple(sorted(produced_by_id))
         if set(produced_by_id) != set(expected_by_id) or any(
-            produced_by_id[output_id].media_type
-            != expected_by_id[output_id].media_type
+            produced_by_id[output_id].media_type != expected_by_id[output_id].media_type
             for output_id in produced_by_id.keys() & expected_by_id.keys()
         ):
             return TaskExecutionResult(

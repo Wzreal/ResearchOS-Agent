@@ -158,3 +158,73 @@ class MalformedCorpusError(ResearchOSError):
 
 class SandboxUnavailableError(ResearchOSError):
     pass
+
+
+class EvidenceStoreNotFound(ResearchOSError):
+    pass
+
+
+class EvidenceStoreAlreadyExists(ResearchOSError):
+    pass
+
+
+class EvidenceStoreRevisionConflict(ResearchOSError):
+    pass
+
+
+class CorruptEvidenceStore(ResearchOSError):
+    pass
+
+
+class EvidencePersistenceError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, store_replaced: bool) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.store_replaced = store_replaced
+
+
+class EvidenceIdempotencyConflict(ResearchOSError):
+    pass
+
+
+class EvidenceTraceCommitError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, store_revision: int) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.store_revision = store_revision
+        self.store_committed = True
+
+
+class ClaimGraphNotFound(ResearchOSError):
+    pass
+
+
+class ClaimGraphAlreadyExists(ResearchOSError):
+    pass
+
+
+class ClaimGraphRevisionConflict(ResearchOSError):
+    pass
+
+
+class CorruptClaimGraph(ResearchOSError):
+    pass
+
+
+class ClaimGraphPersistenceError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, store_replaced: bool) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.store_replaced = store_replaced
+
+
+class ClaimGraphTraceCommitError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, store_revision: int) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.store_revision = store_revision
+        self.store_committed = True
+
+
+class ClaimGraphPreconditionError(ResearchOSError):
+    pass

@@ -493,3 +493,72 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   explicit but Phase 4 provides no cross-process exactly-once guarantee.
   Durable Tool deduplication, real LLM/browser/search providers, hostile-code
   isolation, Evidence Memory, claims, and synthesis remain later-phase work.
+
+## ADR-0021: Separate stable evidence/claim identity from revisions and runtime occurrence
+
+- **Status:** Accepted
+- **Date:** 2026-08-28
+- **Context:** Phase 5 must retain evidence produced by retryable Agent/Tool
+  execution without making mutable content or attempt identity the entity key.
+  It also needs recoverable local persistence while avoiding a database, WAL,
+  event-sourcing architecture, or Phase 6 truth judgement.
+- **Scope note:** This ADR intentionally consolidates the three Phase 5
+  decisions originally planned as ADR-0021 (identity and revision), ADR-0022
+  (snapshot persistence and crash boundaries), and ADR-0023 (Agent observation
+  ingestion and trace ordering). They share the same canonical identity,
+  immutable revision, and receipt-replay invariant; recording them together
+  prevents incompatible partial decisions while the separate paragraphs below
+  retain all three decision boundaries.
+- **Decision:** A source is identified by run, source type, and canonical
+  locator. Evidence is identified by run, source ID, immutable
+  extractor-specific scope, and media type. Browser page bodies use the fixed
+  `browser-page-body-v1` scope. Local chunks hash `local-chunk-v1`, document
+  ID, and chunk ID. Search snippets hash `search-snippet-v1`, the safe canonical
+  Tool-input hash, and a source-native snippet locator, with a canonical-source
+  and normalized-snippet-hash fallback. Rank, attempt ID, attempt number, and
+  model Tool-call ID never participate.
+
+  `EvidenceRevision` represents changed content or extraction context.
+  `IngestionReceipt` represents runtime occurrence provenance. The stable
+  idempotency payload excludes occurrence fields. Retrying the same logical
+  result with another attempt/Tool-call ID therefore reuses the evidence and
+  writes a distinct receipt. Different result content changes the canonical
+  request hash and ingestion operation identity; if source/scope are unchanged
+  it creates an evidence revision rather than an idempotency conflict.
+
+  A claim ID hashes run and immutable `claim_scope_key`; normalized statement
+  hash serves only content comparison and duplicate discovery. An edge ID
+  hashes run, claim, and evidence. Exactly one current relation is permitted
+  per claim/evidence pair, with relation changes represented as immutable edge
+  revisions. Tombstones retain history. Conflict reporting nominates current
+  support/contradiction sets but does not decide truth.
+
+  Phase 5 uses separate deterministic whole-file JSONL snapshots at
+  `outputs/<run_id>/evidence.jsonl` and `claims.jsonl`. Each has a schema/store
+  revision header, record count, canonical payload hash, and sorted records.
+  Writes use a same-directory temporary file, file fsync, atomic replace, and
+  parent-directory fsync where supported. Stores use compare-and-swap
+  revisions, validate run/cross-record identity, and reject models requiring
+  redaction. There is one application writer per run; this is not a WAL,
+  transaction log, append log, or event source.
+
+  Agent terminal results retain validated observations. The task backend
+  extracts/ingests every eligible successful observation before mapping the
+  Agent terminal result, even when that result is failure. Evidence/claim state
+  is authoritative once the snapshot commits. A subsequent semantic trace
+  append failure raises a typed `store_committed` failure, does not roll back
+  state, and is safe to replay through receipts. Trace attributes contain only
+  IDs, hashes, revisions, disposition/relation, and store revision.
+
+  Citation integrity is structural. Dangling source/claim/evidence references,
+  identity or content-hash mismatch, and nonexistent revisions are errors.
+  Superseded but still addressable immutable revisions and tombstoned current
+  entities are warnings and do not make the result invalid. Citation IDs are
+  stable within a validation request; reusing one ID for a different reference
+  is a structural error.
+- **Consequences:** Task retries preserve logical evidence identity and honest
+  runtime provenance, while claim and edge history remain stable under content
+  changes. Local recovery can detect torn/corrupt snapshots without choosing a
+  database. Multi-process leases, a general trace reconciliation outbox,
+  evidence quality/truth scoring, synthesis, verification, and physical
+  compaction are deferred to later phases.

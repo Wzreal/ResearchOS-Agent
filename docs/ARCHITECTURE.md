@@ -187,15 +187,49 @@ Milvus or any specific embedding provider.
 
 ### 6. Evidence Memory
 
-`EvidenceMemory` stores normalized evidence and exposes deterministic lookup and
-deduplication. An evidence record will include source identity, locator,
-retrieved time, content/content hash, extraction context, adapter, and schema
-version. It must preserve original provenance even when normalized.
+`EvidenceMemory` accepts only validated, successful Browser, Search, and Local
+Retrieval observations. `AgentRunner` returns terminal status together with all
+validated observations; the Phase 3 backend ingests eligible successes before
+mapping that terminal status. A later Agent failure therefore does not erase
+evidence already retrieved. Failed or malformed Tool results, Python output,
+artifacts, and operations that were never dispatched are not ingested.
 
-The Claim-Evidence Graph stores atomic claims and typed edges such as
-`SUPPORTS`, `CONTRADICTS`, and `CONTEXTUALIZES`, including assessment metadata
-and revision history. Persistence is behind interfaces so local Phase 5 storage
-does not commit the project to a future database.
+Source identity is the run, source type, and canonical source locator. Evidence identity is
+the run, source, immutable extractor-specific scope, and media type. Browser
+body scope is page-level, Local Retrieval scope is document/chunk-level, and
+Search snippet scope includes the safe Tool-input hash and stable snippet
+locator. Rank, attempt ID, and model Tool-call ID never affect evidence
+identity. Content changes create immutable `EvidenceRevision` records.
+Runtime occurrence provenance is held separately in `IngestionReceipt`; its
+attempt and Tool-call fields do not affect the logical ingestion operation or
+canonical request hash.
+
+Claims use an immutable `claim_scope_key`; mutable statement content is only a
+revision/duplicate hash. Exactly one current edge exists for each claim and
+evidence pair, and relation changes create edge revisions. Current entities
+may be tombstoned but history is retained. Conflict candidates are active
+claims that currently have both supporting and contradicting evidence; Phase 5
+does not judge their truth. Conflict queries consider only active entities and
+edges pinned to the entities' current revisions. Deterministic, bounded query
+methods provide current and exact historical claim/evidence lookup, forward
+and reverse edge traversal, relation filters, tombstone inclusion when
+explicitly requested, and stable ID ordering.
+
+Persistence remains behind `EvidenceStore` and `ClaimGraphStore`. The local
+adapters rewrite deterministic `evidence.jsonl` and `claims.jsonl` snapshots
+with schema/store revision, record count, canonical payload hash, sorted
+records, temp-file fsync, atomic replace, and parent-directory fsync. They use
+compare-and-swap store revisions and reject data that would require redaction.
+This is a single-writer snapshot design, not a WAL, append log, or event source.
+Evidence/claim state commits before its semantic trace append; trace failure is
+typed as already committed and never rolls state back. General cross-process
+trace reconciliation remains Phase 8.
+
+Citation integrity checks structure only. Dangling identities, bad hashes,
+and nonexistent revisions are errors. A valid immutable historical revision
+that is no longer current, or a tombstoned current entity that remains
+addressable, is a warning and does not invalidate the result. Reusing a
+citation ID for a different reference is an error.
 
 ### 7. Verification
 

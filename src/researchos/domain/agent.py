@@ -75,6 +75,7 @@ class AgentObservation(ContractModel):
     capability_id: SafeId
     tool_id: SafeId
     adapter_id: SafeId
+    tool_input_hash: Sha256
     tool_operation_key: Sha256
     result: ToolInvocationResult
 
@@ -157,6 +158,7 @@ class AgentExecutionResult(ContractModel):
     usage: RuntimeResourceAmount | None = None
     usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN
     backend_receipt: SafeId | None = None
+    observations: tuple[AgentObservation, ...] = ()
 
     @model_validator(mode="after")
     def result_is_consistent(self) -> AgentExecutionResult:
