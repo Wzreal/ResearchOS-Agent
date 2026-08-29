@@ -204,6 +204,13 @@ Runtime occurrence provenance is held separately in `IngestionReceipt`; its
 attempt and Tool-call fields do not affect the logical ingestion operation or
 canonical request hash.
 
+Text normalization is `text-nfc-lines-v1`: NFC, LF line endings, removal of
+line-trailing spaces/tabs and outer blank lines, with no case-folding or
+internal-whitespace collapse. Original content is retained. URL
+canonicalization treats query text as opaque and preserves its ordering,
+duplicates, and encoding while normalizing only scheme/host, default port,
+fragment, and empty path.
+
 Claims use an immutable `claim_scope_key`; mutable statement content is only a
 revision/duplicate hash. Exactly one current edge exists for each claim and
 evidence pair, and relation changes create edge revisions. Current entities
@@ -215,6 +222,11 @@ methods provide current and exact historical claim/evidence lookup, forward
 and reverse edge traversal, relation filters, tombstone inclusion when
 explicitly requested, and stable ID ordering.
 
+Calling claim creation again with the same scope and normalized statement is
+idempotent; changed statement content appends a revision to the same claim.
+The Agent backend sorts terminal observations by `(agent_step, tool_call_id)`
+before ingestion so evidence capture does not depend on adapter tuple order.
+
 Persistence remains behind `EvidenceStore` and `ClaimGraphStore`. The local
 adapters rewrite deterministic `evidence.jsonl` and `claims.jsonl` snapshots
 with schema/store revision, record count, canonical payload hash, sorted
@@ -225,11 +237,19 @@ Evidence/claim state commits before its semantic trace append; trace failure is
 typed as already committed and never rolls state back. General cross-process
 trace reconciliation remains Phase 8.
 
+Snapshot load/save validation requires continuous revision chains, maximum
+current pointers, existing predecessors and receipt targets, unambiguous
+mutation replay identity, and internally valid edge-to-claim revision pins.
+Cross-store evidence references are validated at the graph service/citation
+boundary, not through an implicit transaction.
+
 Citation integrity checks structure only. Dangling identities, bad hashes,
 and nonexistent revisions are errors. A valid immutable historical revision
 that is no longer current, or a tombstoned current entity that remains
 addressable, is a warning and does not invalidate the result. Reusing a
 citation ID for a different reference is an error.
+Every citation pins both its source ID and expected evidence content hash; both
+must match the selected evidence entity/revision.
 
 ### 7. Verification
 

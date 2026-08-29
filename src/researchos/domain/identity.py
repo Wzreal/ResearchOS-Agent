@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import unicodedata
 from typing import Any
 
@@ -29,7 +28,11 @@ def stable_id(prefix: str, value: Any) -> str:
 
 
 def normalize_content(value: str) -> str:
-    normalized = unicodedata.normalize(
-        "NFC", value.replace("\r\n", "\n").replace("\r", "\n")
-    )
-    return re.sub(r"[ \t]+", " ", normalized).strip()
+    normalized = unicodedata.normalize("NFC", value)
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip(" \t") for line in normalized.split("\n")]
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)

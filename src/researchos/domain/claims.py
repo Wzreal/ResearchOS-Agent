@@ -38,6 +38,8 @@ class CitationIssueCode(StrEnum):
     DANGLING_EVIDENCE = "dangling_evidence"
     DANGLING_SOURCE = "dangling_source"
     CONTENT_HASH_MISMATCH = "content_hash_mismatch"
+    CITATION_SOURCE_MISMATCH = "citation_source_mismatch"
+    CITATION_CONTENT_HASH_MISMATCH = "citation_content_hash_mismatch"
     IDENTITY_MISMATCH = "identity_mismatch"
     MISSING_REVISION = "missing_revision"
     STALE_CLAIM_REVISION = "stale_claim_revision"
@@ -180,6 +182,12 @@ class ClaimGraphSnapshot(ContractModel):
             edge_revision_keys
         ) != len(self.edge_revisions):
             raise ValueError("duplicate graph revision")
+        receipt_ids = [item.receipt_id for item in self.receipts]
+        operation_keys = [item.operation_key for item in self.receipts]
+        if len(receipt_ids) != len(set(receipt_ids)):
+            raise ValueError("duplicate claim mutation receipt identity")
+        if len(operation_keys) != len(set(operation_keys)):
+            raise ValueError("ambiguous claim mutation operation identity")
         for item in (
             *self.claims,
             *self.claim_revisions,
@@ -190,8 +198,17 @@ class ClaimGraphSnapshot(ContractModel):
             if item.run_id != self.run_id:
                 raise ValueError("graph contains another run")
         for claim in self.claims:
-            if (claim.claim_id, claim.current_revision) not in claim_revision_keys:
-                raise ValueError("claim current revision does not exist")
+            entity_revisions = sorted(
+                item.revision
+                for item in self.claim_revisions
+                if item.claim_id == claim.claim_id
+            )
+            if entity_revisions != list(range(1, claim.current_revision + 1)):
+                raise ValueError(
+                    "claim revisions must be continuous through current revision"
+                )
+            if not entity_revisions or entity_revisions[-1] != claim.current_revision:
+                raise ValueError("claim current revision must be the maximum")
             if claim.claim_id != stable_id(
                 "claim", [self.run_id, claim.claim_scope_key]
             ):
@@ -199,23 +216,54 @@ class ClaimGraphSnapshot(ContractModel):
         if any(item.claim_id not in claim_id_set for item in self.claim_revisions):
             raise ValueError("orphan claim revision")
         for revision in self.claim_revisions:
+            predecessor = (
+                None
+                if revision.supersedes_revision is None
+                else (revision.claim_id, revision.supersedes_revision)
+            )
+            if predecessor is not None and predecessor not in claim_revision_keys:
+                raise ValueError("claim revision predecessor does not exist")
             if revision.normalized_statement_hash != sha256_text(
                 normalize_content(revision.statement)
             ):
                 raise ValueError("normalized claim statement hash differs")
         for edge in self.edges:
-            if (
-                edge.claim_id not in claim_id_set
-                or (edge.edge_id, edge.current_revision) not in edge_revision_keys
-            ):
-                raise ValueError("edge has a dangling claim/current revision")
+            if edge.claim_id not in claim_id_set:
+                raise ValueError("edge has a dangling claim")
+            entity_revisions = sorted(
+                item.revision
+                for item in self.edge_revisions
+                if item.edge_id == edge.edge_id
+            )
+            if entity_revisions != list(range(1, edge.current_revision + 1)):
+                raise ValueError(
+                    "edge revisions must be continuous through current revision"
+                )
+            if not entity_revisions or entity_revisions[-1] != edge.current_revision:
+                raise ValueError("edge current revision must be the maximum")
             if edge.edge_id != stable_id(
                 "edge", [self.run_id, edge.claim_id, edge.evidence_id]
             ):
                 raise ValueError("edge identity does not match claim/evidence pair")
         if any(item.edge_id not in edge_id_set for item in self.edge_revisions):
             raise ValueError("orphan edge revision")
+        edge_by_id = {item.edge_id: item for item in self.edges}
+        for revision in self.edge_revisions:
+            predecessor = (
+                None
+                if revision.supersedes_revision is None
+                else (revision.edge_id, revision.supersedes_revision)
+            )
+            if predecessor is not None and predecessor not in edge_revision_keys:
+                raise ValueError("edge revision predecessor does not exist")
+            edge = edge_by_id[revision.edge_id]
+            if (edge.claim_id, revision.claim_revision) not in claim_revision_keys:
+                raise ValueError("edge revision pins a missing claim revision")
         for receipt in self.receipts:
+            if receipt.receipt_id != stable_id(
+                "cmr", [receipt.operation_key, receipt.request_hash]
+            ):
+                raise ValueError("claim receipt identity is ambiguous")
             if (
                 receipt.claim_id not in claim_id_set
                 or (receipt.claim_id, receipt.claim_revision) not in claim_revision_keys
@@ -226,6 +274,19 @@ class ClaimGraphSnapshot(ContractModel):
                 or (receipt.edge_id, receipt.edge_revision) not in edge_revision_keys
             ):
                 raise ValueError("claim receipt references missing edge revision")
+            if receipt.edge_id is not None:
+                edge = edge_by_id[receipt.edge_id]
+                edge_revision = next(
+                    item
+                    for item in self.edge_revisions
+                    if item.edge_id == receipt.edge_id
+                    and item.revision == receipt.edge_revision
+                )
+                if (
+                    edge.claim_id != receipt.claim_id
+                    or edge_revision.claim_revision != receipt.claim_revision
+                ):
+                    raise ValueError("claim receipt edge reference is inconsistent")
         return self
 
 
@@ -251,6 +312,8 @@ class CitationReference(ContractModel):
     claim_revision: int = Field(ge=1)
     evidence_id: SafeId
     evidence_revision: int = Field(ge=1)
+    source_id: SafeId
+    expected_evidence_content_hash: Sha256
 
 
 class CitationIntegrityIssue(ContractModel):

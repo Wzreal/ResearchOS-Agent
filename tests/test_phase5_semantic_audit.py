@@ -36,7 +36,11 @@ from researchos.application.errors import (
     EvidenceStoreNotFound,
     EvidenceTraceCommitError,
 )
-from researchos.application.evidence_extractor import EvidenceExtractor, sha256_text
+from researchos.application.evidence_extractor import (
+    EvidenceExtractor,
+    canonicalize_url,
+    sha256_text,
+)
 from researchos.domain.agent import (
     AgentDescriptor,
     AgentError,
@@ -54,6 +58,7 @@ from researchos.domain.claims import (
     ClaimGenerationContext,
 )
 from researchos.domain.evidence import RecordLifecycle
+from researchos.domain.identity import normalize_content
 from researchos.domain.runtime import (
     ExecutionResultStatus,
     IdempotencyMode,
@@ -128,7 +133,56 @@ def test_claim_generation_context_revisions_do_not_change_logical_identity() -> 
         created.claim.claim_scope_key = "scope_b"  # type: ignore[misc]
 
 
-def test_normalized_duplicate_across_sources_does_not_merge_raw_content() -> None:
+def test_create_claim_same_scope_changed_statement_appends_revision() -> None:
+    _, _, claim_store, graph = graph_services()
+    ctx = context()
+    first = graph.create_claim(
+        run_id=ctx.run_id,
+        run_revision=ctx.run_revision,
+        claim_scope_key="scope_a",
+        statement="version one",
+    )
+    generation_context = ClaimGenerationContext(
+        run_revision=ctx.run_revision,
+        producer_id="agent_a",
+        task_id=ctx.task_id,
+    )
+    revision_operation = "f" * 64
+    second = graph.create_claim(
+        run_id=ctx.run_id,
+        run_revision=ctx.run_revision,
+        claim_scope_key="scope_a",
+        statement="version two",
+        generation_context=generation_context,
+        operation_key=revision_operation,
+    )
+    replay = graph.create_claim(
+        run_id=ctx.run_id,
+        run_revision=ctx.run_revision,
+        claim_scope_key="scope_a",
+        statement="version two",
+        generation_context=generation_context,
+        operation_key=revision_operation,
+    )
+    with pytest.raises(ClaimGraphPreconditionError):
+        graph.create_claim(
+            run_id=ctx.run_id,
+            run_revision=ctx.run_revision,
+            claim_scope_key="scope_a",
+            statement="version three",
+            operation_key=revision_operation,
+        )
+
+    snapshot = claim_store.load(ctx.run_id)
+    assert first.claim.claim_id == second.claim.claim_id == replay.claim.claim_id
+    assert second.revision.revision == replay.revision.revision == 2
+    assert second.revision.generation_context == generation_context
+    assert len(snapshot.claims) == 1
+    assert [item.revision for item in snapshot.claim_revisions] == [1, 2]
+    assert len(snapshot.receipts) == 2
+
+
+def test_internal_space_difference_is_not_a_normalized_duplicate() -> None:
     memory, store, _ = build_memory()
     ctx = context()
     first = _ingest(memory, ctx, "https://example.com/a", "alpha  beta", "5" * 64)
@@ -147,11 +201,29 @@ def test_normalized_duplicate_across_sources_does_not_merge_raw_content() -> Non
     assert first_revision.content_hash != second_revision.content_hash
     assert (
         first_revision.normalized_content_hash
-        == second_revision.normalized_content_hash
+        != second_revision.normalized_content_hash
     )
     assert len(snapshot.evidence) == 2
-    assert memory.duplicate_evidence(ctx.run_id, first.items[0].evidence_id) == (
-        second.items[0].evidence_id,
+    assert memory.duplicate_evidence(ctx.run_id, first.items[0].evidence_id) == ()
+
+
+def test_text_nfc_lines_normalization_is_conservative() -> None:
+    assert normalize_content("alpha  \r\nbeta\t") == "alpha\nbeta"
+    assert normalize_content("\n\nalpha\n\n") == "alpha"
+    assert normalize_content("alpha  beta") != normalize_content("alpha beta")
+    assert normalize_content("É") == normalize_content("E\u0301")
+
+
+def test_url_canonicalization_preserves_query_order_and_encoding() -> None:
+    assert canonicalize_url("https://example.com/?a=1&a=2") != canonicalize_url(
+        "https://example.com/?a=2&a=1"
+    )
+    assert canonicalize_url("https://example.com/?value=%2F") != canonicalize_url(
+        "https://example.com/?value=/"
+    )
+    assert (
+        canonicalize_url("HTTPS://Example.com:443?b=2&a=1#fragment")
+        == "https://example.com/?b=2&a=1"
     )
 
 
@@ -742,12 +814,25 @@ def test_citation_warnings_remain_valid_and_duplicate_id_conflict_is_error() -> 
     validator = CitationIntegrityValidator(
         claim_store=claim_store, evidence_store=evidence_store
     )
+    evidence_snapshot = evidence_store.load(ctx.run_id)
+    evidence_record = next(
+        item
+        for item in evidence_snapshot.evidence
+        if item.evidence_id == first.items[0].evidence_id
+    )
+    evidence_revision = next(
+        item
+        for item in evidence_snapshot.revisions
+        if item.evidence_id == first.items[0].evidence_id and item.revision == 1
+    )
     historical = CitationReference(
         citation_id="citation_a",
         claim_id=claim.claim.claim_id,
         claim_revision=1,
         evidence_id=first.items[0].evidence_id,
         evidence_revision=1,
+        source_id=evidence_record.source_id,
+        expected_evidence_content_hash=evidence_revision.content_hash,
     )
     warnings = validator.validate(ctx.run_id, (historical,))
     assert warnings.valid is True
@@ -770,6 +855,70 @@ def test_citation_warnings_remain_valid_and_duplicate_id_conflict_is_error() -> 
     assert CitationIssueCode.CONFLICTING_DUPLICATE_CITATION_ID in {
         item.code for item in errors.issues
     }
+
+
+def test_citation_pins_source_and_evidence_content() -> None:
+    memory, evidence_store, claim_store, graph = graph_services()
+    ctx = context()
+    first = _ingest(memory, ctx, "https://example.com/a", "first", "5" * 64)
+    second = _ingest(memory, ctx, "https://example.com/b", "second", "6" * 64)
+    claim = graph.create_claim(
+        run_id=ctx.run_id,
+        run_revision=ctx.run_revision,
+        claim_scope_key="scope_a",
+        statement="claim",
+    )
+    snapshot = evidence_store.load(ctx.run_id)
+    first_record = next(
+        item
+        for item in snapshot.evidence
+        if item.evidence_id == first.items[0].evidence_id
+    )
+    first_revision = next(
+        item
+        for item in snapshot.revisions
+        if item.evidence_id == first_record.evidence_id and item.revision == 1
+    )
+    validator = CitationIntegrityValidator(
+        claim_store=claim_store, evidence_store=evidence_store
+    )
+    valid = CitationReference(
+        citation_id="citation_current",
+        claim_id=claim.claim.claim_id,
+        claim_revision=1,
+        evidence_id=first_record.evidence_id,
+        evidence_revision=1,
+        source_id=first_record.source_id,
+        expected_evidence_content_hash=first_revision.content_hash,
+    )
+    assert validator.validate(ctx.run_id, (valid,)).issues == ()
+
+    wrong_source = valid.model_copy(update={"source_id": "src_wrong"})
+    source_result = validator.validate(ctx.run_id, (wrong_source,))
+    assert source_result.valid is False
+    assert CitationIssueCode.CITATION_SOURCE_MISMATCH in {
+        item.code for item in source_result.issues
+    }
+    assert CitationIssueCode.DANGLING_SOURCE in {
+        item.code for item in source_result.issues
+    }
+
+    wrong_hash = valid.model_copy(update={"expected_evidence_content_hash": "0" * 64})
+    hash_result = validator.validate(ctx.run_id, (wrong_hash,))
+    assert hash_result.valid is False
+    assert CitationIssueCode.CITATION_CONTENT_HASH_MISMATCH in {
+        item.code for item in hash_result.issues
+    }
+
+    swapped_evidence = valid.model_copy(
+        update={"evidence_id": second.items[0].evidence_id}
+    )
+    swapped_result = validator.validate(ctx.run_id, (swapped_evidence,))
+    assert swapped_result.valid is False
+    assert {
+        CitationIssueCode.CITATION_SOURCE_MISMATCH,
+        CitationIssueCode.CITATION_CONTENT_HASH_MISMATCH,
+    } <= {item.code for item in swapped_result.issues}
 
 
 def test_evidence_trace_failure_retry_replays_receipt_without_new_revision() -> None:

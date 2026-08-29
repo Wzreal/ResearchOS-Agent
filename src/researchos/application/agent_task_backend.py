@@ -45,7 +45,10 @@ class AgentTaskExecutionBackend:
         result = await self._runner.run(context, cancellation)
         if self._evidence_ingestor is not None:
             try:
-                for observation in result.observations:
+                for observation in sorted(
+                    result.observations,
+                    key=lambda item: (item.agent_step, item.tool_call_id),
+                ):
                     await self._evidence_ingestor.ingest_observation(
                         context, observation
                     )

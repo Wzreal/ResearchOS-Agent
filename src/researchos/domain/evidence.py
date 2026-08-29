@@ -214,8 +214,17 @@ class EvidenceStoreSnapshot(ContractModel):
         for record in self.evidence:
             if record.run_id != self.run_id or record.source_id not in source_ids:
                 raise ValueError("invalid evidence source/run reference")
-            if (record.evidence_id, record.current_revision) not in revision_keys:
-                raise ValueError("evidence current revision does not exist")
+            entity_revisions = sorted(
+                item.revision
+                for item in self.revisions
+                if item.evidence_id == record.evidence_id
+            )
+            if entity_revisions != list(range(1, record.current_revision + 1)):
+                raise ValueError(
+                    "evidence revisions must be continuous through current revision"
+                )
+            if not entity_revisions or entity_revisions[-1] != record.current_revision:
+                raise ValueError("evidence current revision must be the maximum")
             expected_evidence_id = stable_id(
                 "ev",
                 [
@@ -230,6 +239,13 @@ class EvidenceStoreSnapshot(ContractModel):
         if any(item.evidence_id not in evidence_ids for item in self.revisions):
             raise ValueError("orphan evidence revision")
         for revision in self.revisions:
+            predecessor = (
+                None
+                if revision.supersedes_revision is None
+                else (revision.evidence_id, revision.supersedes_revision)
+            )
+            if predecessor is not None and predecessor not in revision_keys:
+                raise ValueError("evidence revision predecessor does not exist")
             if revision.content_hash != sha256_text(revision.content):
                 raise ValueError("evidence content hash differs")
             if revision.normalized_content_hash != sha256_text(
@@ -244,6 +260,8 @@ class EvidenceStoreSnapshot(ContractModel):
             if item.run_id != self.run_id:
                 raise ValueError("snapshot contains another run")
         for receipt in self.receipts:
+            if not receipt.evidence_refs:
+                raise ValueError("ingestion receipt must reference evidence")
             if any(
                 ref.evidence_id not in evidence_ids
                 or (ref.evidence_id, ref.revision) not in revision_keys

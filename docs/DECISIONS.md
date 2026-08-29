@@ -526,12 +526,27 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   request hash and ingestion operation identity; if source/scope are unchanged
   it creates an evidence revision rather than an idempotency conflict.
 
+  `text-nfc-lines-v1` normalization applies Unicode NFC, normalizes CRLF/CR to
+  LF, removes trailing spaces/tabs per line, and removes outer blank lines. It
+  does not case-fold or collapse internal whitespace, and the original content
+  remains immutable. Web source canonicalization lowercases scheme/host,
+  removes fragments and default ports, and supplies `/` for an empty path. The
+  raw query component is opaque: order, duplicates, and encoding are preserved.
+
   A claim ID hashes run and immutable `claim_scope_key`; normalized statement
   hash serves only content comparison and duplicate discovery. An edge ID
   hashes run, claim, and evidence. Exactly one current relation is permitted
   per claim/evidence pair, with relation changes represented as immutable edge
   revisions. Tombstones retain history. Conflict reporting nominates current
   support/contradiction sets but does not decide truth.
+
+  Repeating `create_claim` for the same scope and normalized statement returns
+  the current revision. Repeating it with different statement content appends
+  the next revision to the same claim identity; explicit CAS-based
+  `revise_claim` remains available. Generation context is revision provenance
+  only. Before evidence ingestion, the Agent backend orders observations by
+  Agent step and Tool-call ID so adapter output order cannot affect ingestion
+  order.
 
   Phase 5 uses separate deterministic whole-file JSONL snapshots at
   `outputs/<run_id>/evidence.jsonl` and `claims.jsonl`. Each has a schema/store
@@ -541,6 +556,13 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   revisions, validate run/cross-record identity, and reject models requiring
   redaction. There is one application writer per run; this is not a WAL,
   transaction log, append log, or event source.
+
+  Snapshot validation fails closed unless every entity revision chain is
+  continuous from 1 through its maximum/current pointer, every predecessor and
+  receipt target exists, edge claim-revision pins belong to the edge's claim,
+  and mutation receipt/replay identities are unambiguous. Evidence references
+  that require the separate Evidence Store remain joint service/validator
+  checks rather than a fabricated cross-store transaction.
 
   Agent terminal results retain validated observations. The task backend
   extracts/ingests every eligible successful observation before mapping the
@@ -555,7 +577,9 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   Superseded but still addressable immutable revisions and tombstoned current
   entities are warnings and do not make the result invalid. Citation IDs are
   stable within a validation request; reusing one ID for a different reference
-  is a structural error.
+  is a structural error. Each citation also pins `source_id` and the expected
+  evidence content hash, which must match the selected immutable evidence
+  revision before a citation is structurally valid.
 - **Consequences:** Task retries preserve logical evidence identity and honest
   runtime provenance, while claim and edge history remain stable under content
   changes. Local recovery can detect torn/corrupt snapshots without choosing a

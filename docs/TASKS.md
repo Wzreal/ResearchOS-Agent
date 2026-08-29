@@ -91,6 +91,9 @@ not aspiration.
 - DONE — Complete the Phase 5 semantic/test-coverage audit, current-valid
   conflict hardening, defensive snapshot validation, and failed-Agent
   observation retention checks.
+- DONE — Harden PR #6 portability, conservative URL/text identity, citation
+  source/content pinning, snapshot/receipt invariants, claim-create revision
+  semantics, and deterministic backend ingestion ordering.
 
 ## Phase 6 — Synthesis and bounded verification
 

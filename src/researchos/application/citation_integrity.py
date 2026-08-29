@@ -163,6 +163,18 @@ class CitationIntegrityValidator:
         for reference in references:
             claim = claim_by_id.get(reference.claim_id)
             item = evidence_by_id.get(reference.evidence_id)
+            cited_source = source_by_id.get(reference.source_id)
+            if cited_source is None:
+                issues.append(
+                    self._issue(
+                        CitationIssueCode.DANGLING_SOURCE,
+                        CitationSeverity.ERROR,
+                        "citation source does not exist",
+                        claim_id=reference.claim_id,
+                        evidence_id=reference.evidence_id,
+                        citation_id=reference.citation_id,
+                    )
+                )
             if claim is None:
                 issues.append(
                     self._issue(
@@ -182,6 +194,7 @@ class CitationIntegrityValidator:
                         "citation claim revision does not exist",
                         claim_id=reference.claim_id,
                         evidence_id=reference.evidence_id,
+                        citation_id=reference.citation_id,
                     )
                 )
             elif reference.claim_revision != claim.current_revision:
@@ -217,10 +230,22 @@ class CitationIntegrityValidator:
                         citation_id=reference.citation_id,
                     )
                 )
-            elif (
-                reference.evidence_id,
-                reference.evidence_revision,
-            ) not in evidence_revisions:
+            else:
+                if item.source_id != reference.source_id:
+                    issues.append(
+                        self._issue(
+                            CitationIssueCode.CITATION_SOURCE_MISMATCH,
+                            CitationSeverity.ERROR,
+                            "citation source does not match its evidence",
+                            claim_id=reference.claim_id,
+                            evidence_id=reference.evidence_id,
+                            citation_id=reference.citation_id,
+                        )
+                    )
+            cited_revision = evidence_revisions.get(
+                (reference.evidence_id, reference.evidence_revision)
+            )
+            if cited_revision is None:
                 issues.append(
                     self._issue(
                         CitationIssueCode.MISSING_REVISION,
@@ -231,17 +256,34 @@ class CitationIntegrityValidator:
                         citation_id=reference.citation_id,
                     )
                 )
-            elif reference.evidence_revision != item.current_revision:
-                issues.append(
-                    self._issue(
-                        CitationIssueCode.STALE_EVIDENCE_REVISION,
-                        CitationSeverity.WARNING,
-                        "citation uses a valid superseded evidence revision",
-                        claim_id=reference.claim_id,
-                        evidence_id=reference.evidence_id,
-                        citation_id=reference.citation_id,
+            else:
+                if (
+                    cited_revision.content_hash
+                    != reference.expected_evidence_content_hash
+                ):
+                    issues.append(
+                        self._issue(
+                            CitationIssueCode.CITATION_CONTENT_HASH_MISMATCH,
+                            CitationSeverity.ERROR,
+                            "citation content pin does not match its revision",
+                            claim_id=reference.claim_id,
+                            evidence_id=reference.evidence_id,
+                            citation_id=reference.citation_id,
+                        )
                     )
-                )
+                if item is not None and (
+                    reference.evidence_revision != item.current_revision
+                ):
+                    issues.append(
+                        self._issue(
+                            CitationIssueCode.STALE_EVIDENCE_REVISION,
+                            CitationSeverity.WARNING,
+                            "citation uses a valid superseded evidence revision",
+                            claim_id=reference.claim_id,
+                            evidence_id=reference.evidence_id,
+                            citation_id=reference.citation_id,
+                        )
+                    )
             if item is not None and item.lifecycle is RecordLifecycle.TOMBSTONED:
                 issues.append(
                     self._issue(

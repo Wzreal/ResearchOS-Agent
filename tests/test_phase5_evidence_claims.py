@@ -536,6 +536,17 @@ def test_citation_staleness_is_warning_and_missing_revision_is_error() -> None:
     validator = CitationIntegrityValidator(
         claim_store=claim_store, evidence_store=evidence_store
     )
+    evidence_snapshot = evidence_store.load(ctx.run_id)
+    evidence_record = next(
+        item
+        for item in evidence_snapshot.evidence
+        if item.evidence_id == ingested.items[0].evidence_id
+    )
+    evidence_revision = next(
+        item
+        for item in evidence_snapshot.revisions
+        if item.evidence_id == ingested.items[0].evidence_id and item.revision == 1
+    )
     stale = validator.validate(
         ctx.run_id,
         (
@@ -545,6 +556,8 @@ def test_citation_staleness_is_warning_and_missing_revision_is_error() -> None:
                 claim_revision=1,
                 evidence_id=ingested.items[0].evidence_id,
                 evidence_revision=1,
+                source_id=evidence_record.source_id,
+                expected_evidence_content_hash=evidence_revision.content_hash,
             ),
         ),
     )
@@ -562,6 +575,8 @@ def test_citation_staleness_is_warning_and_missing_revision_is_error() -> None:
                 claim_revision=99,
                 evidence_id=ingested.items[0].evidence_id,
                 evidence_revision=99,
+                source_id=evidence_record.source_id,
+                expected_evidence_content_hash=evidence_revision.content_hash,
             ),
         ),
     )
@@ -670,6 +685,39 @@ def test_backend_ingests_successful_observation_before_mapping_agent_failure() -
     )
     result = asyncio.run(backend.execute(execution_request(), NeverCancelled()))
     assert ingestor.observations == [item]
+    assert result.status is ExecutionResultStatus.FAILED
+    assert result.failure_code == "agent_failed"
+
+
+def test_backend_ingests_observations_in_stable_agent_step_and_call_order() -> None:
+    later = observation(
+        browser("later"), call_id="call_b", operation_key="5" * 64
+    ).model_copy(update={"agent_step": 2})
+    first_b = observation(browser("first b"), call_id="call_b", operation_key="6" * 64)
+    first_a = observation(browser("first a"), call_id="call_a", operation_key="7" * 64)
+    unordered = (later, first_b, first_a)
+    agent_result = AgentExecutionResult(
+        status=AgentExecutionStatus.FAILED,
+        error=AgentError(code="agent_failed", message="failed"),
+        usage=RuntimeResourceAmount(tokens=1),
+        usage_certainty=UsageCertainty.EXACT,
+        observations=unordered,
+    )
+    ingestor = RecordingIngestor()
+    result = asyncio.run(
+        AgentTaskExecutionBackend(
+            StaticRunner(agent_result), evidence_ingestor=ingestor
+        ).execute(execution_request(), NeverCancelled())
+    )
+
+    assert [(item.agent_step, item.tool_call_id) for item in ingestor.observations] == [
+        (1, "call_a"),
+        (1, "call_b"),
+        (2, "call_b"),
+    ]
+    assert {item.tool_operation_key for item in ingestor.observations} == {
+        item.tool_operation_key for item in unordered
+    }
     assert result.status is ExecutionResultStatus.FAILED
     assert result.failure_code == "agent_failed"
 

@@ -6,7 +6,14 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from test_phase5_evidence_claims import browser, build_memory, context, observation
+from pydantic import ValidationError
+from test_phase5_evidence_claims import (
+    browser,
+    build_memory,
+    context,
+    graph_services,
+    observation,
+)
 
 from researchos.adapters import _atomic_file
 from researchos.adapters._snapshot_jsonl import canonical_dict_bytes
@@ -19,8 +26,9 @@ from researchos.application.errors import (
     UnsafePersistenceData,
 )
 from researchos.application.evidence_extractor import stable_id
-from researchos.domain.claims import ClaimGraphSnapshot
+from researchos.domain.claims import ClaimEvidenceRelation, ClaimGraphSnapshot
 from researchos.domain.evidence import (
+    EvidenceRevisionRef,
     EvidenceStoreSnapshot,
     SourceRecord,
     SourceType,
@@ -32,6 +40,53 @@ def _populated_evidence_snapshot() -> EvidenceStoreSnapshot:
     ctx = context()
     asyncio.run(memory.ingest_observation(ctx, observation(browser("content"))))
     return store.load(ctx.run_id)
+
+
+def _three_revision_snapshots():
+    memory, evidence_store, claim_store, graph = graph_services()
+    ctx = context()
+    first = None
+    for number, content in enumerate(("one", "two", "three"), start=1):
+        first = asyncio.run(
+            memory.ingest_observation(
+                ctx.model_copy(
+                    update={"attempt_id": f"attempt_{number}", "attempt_number": number}
+                ),
+                observation(
+                    browser(content),
+                    call_id=f"call_{number}",
+                ),
+            )
+        )
+    assert first is not None
+    claim = graph.create_claim(
+        run_id=ctx.run_id,
+        run_revision=ctx.run_revision,
+        claim_scope_key="scope_a",
+        statement="one",
+    )
+    for expected, statement in ((1, "two"), (2, "three")):
+        graph.revise_claim(
+            run_id=ctx.run_id,
+            run_revision=ctx.run_revision,
+            claim_id=claim.claim.claim_id,
+            statement=statement,
+            expected_revision=expected,
+        )
+    evidence_id = first.items[0].evidence_id
+    for relation in (
+        ClaimEvidenceRelation.SUPPORTS,
+        ClaimEvidenceRelation.CONTRADICTS,
+        ClaimEvidenceRelation.CONTEXTUALIZES,
+    ):
+        graph.relate(
+            run_id=ctx.run_id,
+            run_revision=ctx.run_revision,
+            claim_id=claim.claim.claim_id,
+            evidence_id=evidence_id,
+            relation=relation,
+        )
+    return evidence_store.load(ctx.run_id), claim_store.load(ctx.run_id)
 
 
 @pytest.mark.parametrize(
@@ -172,8 +227,22 @@ def test_windows_parent_directory_fsync_open_failure_is_best_effort(
         del path, flags
         raise OSError("directory handles may not support fsync")
 
+    monkeypatch.setattr(_atomic_file, "_is_windows", lambda: True)
     monkeypatch.setattr(_atomic_file.os, "open", fail_open)
     _atomic_file.fsync_parent(tmp_path)
+
+
+def test_non_windows_parent_directory_fsync_open_failure_fails_closed(
+    monkeypatch, tmp_path
+) -> None:
+    def fail_open(path, flags):
+        del path, flags
+        raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(_atomic_file, "_is_windows", lambda: False)
+    monkeypatch.setattr(_atomic_file.os, "open", fail_open)
+    with pytest.raises(OSError, match="directory fsync failed"):
+        _atomic_file.fsync_parent(tmp_path)
 
 
 @pytest.mark.parametrize("corruption", ["middle", "tail", "hash"])
@@ -252,3 +321,114 @@ def test_filesystem_store_rejects_model_that_requires_redaction(tmp_path) -> Non
     )
     with pytest.raises(UnsafePersistenceData):
         FilesystemEvidenceStore(tmp_path).create(snapshot)
+
+
+@pytest.mark.parametrize("missing_revision", [2])
+def test_evidence_snapshot_rejects_missing_middle_revision(
+    missing_revision,
+) -> None:
+    evidence, _ = _three_revision_snapshots()
+    corrupt = evidence.model_copy(
+        update={
+            "revisions": tuple(
+                item for item in evidence.revisions if item.revision != missing_revision
+            )
+        }
+    )
+    with pytest.raises(ValidationError):
+        EvidenceStoreSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+def test_evidence_snapshot_rejects_current_pointer_below_maximum() -> None:
+    evidence, _ = _three_revision_snapshots()
+    record = evidence.evidence[0].model_copy(update={"current_revision": 2})
+    corrupt = evidence.model_copy(update={"evidence": (record,)})
+    with pytest.raises(ValidationError):
+        EvidenceStoreSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+def test_evidence_snapshot_rejects_duplicate_receipt_identity() -> None:
+    evidence, _ = _three_revision_snapshots()
+    corrupt = evidence.model_copy(
+        update={"receipts": (*evidence.receipts, evidence.receipts[0])}
+    )
+    with pytest.raises(ValidationError):
+        EvidenceStoreSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+def test_evidence_snapshot_rejects_receipt_with_missing_revision() -> None:
+    evidence, _ = _three_revision_snapshots()
+    receipt = evidence.receipts[0].model_copy(
+        update={
+            "evidence_refs": (
+                EvidenceRevisionRef(
+                    evidence_id=evidence.evidence[0].evidence_id,
+                    revision=99,
+                ),
+            )
+        }
+    )
+    corrupt = evidence.model_copy(
+        update={"receipts": (receipt, *evidence.receipts[1:])}
+    )
+    with pytest.raises(ValidationError):
+        EvidenceStoreSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+@pytest.mark.parametrize("record_type", ["claim", "edge"])
+def test_claim_snapshot_rejects_missing_middle_revision(record_type) -> None:
+    _, claims = _three_revision_snapshots()
+    field = "claim_revisions" if record_type == "claim" else "edge_revisions"
+    records = getattr(claims, field)
+    corrupt = claims.model_copy(
+        update={field: tuple(item for item in records if item.revision != 2)}
+    )
+    with pytest.raises(ValidationError):
+        ClaimGraphSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+@pytest.mark.parametrize("record_type", ["claim", "edge"])
+def test_claim_snapshot_rejects_current_pointer_below_maximum(record_type) -> None:
+    _, claims = _three_revision_snapshots()
+    field = "claims" if record_type == "claim" else "edges"
+    records = getattr(claims, field)
+    changed = records[0].model_copy(update={"current_revision": 2})
+    corrupt = claims.model_copy(update={field: (changed,)})
+    with pytest.raises(ValidationError):
+        ClaimGraphSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+def test_edge_revision_rejects_missing_claim_revision_pin() -> None:
+    _, claims = _three_revision_snapshots()
+    changed = claims.edge_revisions[-1].model_copy(update={"claim_revision": 99})
+    corrupt = claims.model_copy(
+        update={
+            "edge_revisions": (*claims.edge_revisions[:-1], changed),
+        }
+    )
+    with pytest.raises(ValidationError):
+        ClaimGraphSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+def test_claim_snapshot_rejects_duplicate_receipt() -> None:
+    _, claims = _three_revision_snapshots()
+    corrupt = claims.model_copy(
+        update={"receipts": (*claims.receipts, claims.receipts[0])}
+    )
+    with pytest.raises(ValidationError):
+        ClaimGraphSnapshot.model_validate(corrupt.model_dump(mode="python"))
+
+
+def test_claim_snapshot_rejects_ambiguous_mutation_operation() -> None:
+    _, claims = _three_revision_snapshots()
+    original = claims.receipts[0]
+    request_hash = "f" * 64
+    ambiguous = original.model_copy(
+        update={
+            "request_hash": request_hash,
+            "receipt_id": stable_id("cmr", [original.operation_key, request_hash]),
+        }
+    )
+    corrupt = claims.model_copy(update={"receipts": (*claims.receipts, ambiguous)})
+    with pytest.raises(ValidationError):
+        ClaimGraphSnapshot.model_validate(corrupt.model_dump(mode="python"))

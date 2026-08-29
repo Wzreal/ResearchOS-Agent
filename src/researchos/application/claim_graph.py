@@ -92,14 +92,72 @@ class ClaimGraphService:
             self._emit_replay(snapshot, run_revision, receipt)
             return result
         if existing is not None:
-            revision = self._claim_view(
+            current = self._claim_view(
                 snapshot, claim_id, existing.current_revision
             ).revision
-            if revision.normalized_statement_hash != normalized_hash:
-                raise ClaimGraphPreconditionError(
-                    "claim scope already exists with different content"
-                )
-            return ClaimView(claim=existing, revision=revision)
+            if current.normalized_statement_hash == normalized_hash:
+                return ClaimView(claim=existing, revision=current)
+            now = self._clock.now()
+            revision = ClaimRevision(
+                run_id=run_id,
+                claim_id=claim_id,
+                revision=existing.current_revision + 1,
+                statement=statement,
+                normalized_statement_hash=normalized_hash,
+                generation_context=generation_context,
+                created_at=now,
+                supersedes_revision=existing.current_revision,
+            )
+            changed = existing.model_copy(
+                update={
+                    "current_revision": revision.revision,
+                    "lifecycle": RecordLifecycle.ACTIVE,
+                    "updated_at": now,
+                }
+            )
+            mutation = ClaimMutationReceipt(
+                receipt_id=stable_id("cmr", [op, request_hash]),
+                run_id=run_id,
+                operation_key=op,
+                request_hash=request_hash,
+                claim_id=claim_id,
+                claim_revision=revision.revision,
+                recorded_at=now,
+            )
+            updated = snapshot.model_copy(
+                update={
+                    "store_revision": snapshot.store_revision + 1,
+                    "claims": tuple(
+                        changed if item.claim_id == claim_id else item
+                        for item in snapshot.claims
+                    ),
+                    "claim_revisions": tuple(
+                        sorted(
+                            (*snapshot.claim_revisions, revision),
+                            key=lambda item: (item.claim_id, item.revision),
+                        )
+                    ),
+                    "receipts": tuple(
+                        sorted(
+                            (*snapshot.receipts, mutation),
+                            key=lambda item: item.receipt_id,
+                        )
+                    ),
+                }
+            )
+            self._commit(
+                updated,
+                snapshot.store_revision,
+                run_revision,
+                TraceEventType.CLAIM_REVISED,
+                claim_id,
+                {
+                    "claim_id": claim_id,
+                    "claim_revision": revision.revision,
+                    "operation_key": op,
+                },
+            )
+            return ClaimView(claim=changed, revision=revision)
         now = self._clock.now()
         record = ClaimRecord(
             run_id=run_id,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from researchos.domain.agent import AgentContext, AgentObservation
 from researchos.domain.evidence import EvidenceCandidate, SourceType
@@ -30,9 +30,8 @@ def canonicalize_url(value: str) -> str:
         or (parsed.scheme.lower(), port) in {("http", 80), ("https", 443)}
         else f"{host}:{port}"
     )
-    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
     path = parsed.path or "/"
-    return urlunsplit((parsed.scheme.lower(), netloc, path, query, ""))
+    return urlunsplit((parsed.scheme.lower(), netloc, path, parsed.query, ""))
 
 
 class EvidenceExtractor:
