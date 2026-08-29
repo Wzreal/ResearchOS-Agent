@@ -586,3 +586,67 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   database. Multi-process leases, a general trace reconciliation outbox,
   evidence quality/truth scoring, synthesis, verification, and physical
   compaction are deferred to later phases.
+
+## ADR-0022: Freeze inputs and publish deterministic bounded verification artifacts
+
+- **Status:** Accepted
+- **Date:** 2026-08-29
+- **Context:** Phase 6 must synthesize and structurally verify Phase 5 claims and
+  evidence without creating another Agent runtime, durable scheduler, budget
+  ledger, or truth oracle. Model output is untrusted and publication must be
+  replayable across a crash between the authoritative artifact and Markdown.
+- **Decision:** A verification invocation freezes the Claim Graph and Evidence
+  Memory snapshots exactly once. It computes their canonical hashes, derives a
+  `verification_id`, and only then looks up the authoritative artifact. An
+  existing artifact with the same identity is replayed without any model call.
+  The exact verification identity hashes run ID, run revision, Claim snapshot
+  hash, Evidence snapshot hash, policy hash, and model-bundle hash.
+  `synthesis_id` hashes verification identity plus the `initial` discriminator;
+  report-claim identity hashes synthesis, Claim ID, and Claim revision; citation
+  identity hashes report Claim, Evidence ID/revision, source ID, and expected
+  content hash. Finding and acquisition identities use immutable type/entity
+  pins. Model prose, rationale, round, and attempt identity never participate.
+
+  Claim and Evidence model context uses whole-item admission. If the complete
+  record and current revision do not fit, the item is omitted and its ID is
+  recorded; Phase 6 never truncates content while retaining its full-content
+  identity or hash. Red findings always identify a report claim.
+  `CONTRADICTORY_EVIDENCE` also identifies evidence, while `CITATION_GAP`
+  cannot identify an existing citation. Every optional citation/evidence pin
+  must belong to the frozen input.
+
+  The Synthesizer creates exactly one `ReportClaim` for each selected claim.
+  Structural support is derived from frozen current relations, never asserted
+  by a model. Blue returns bounded actions, not a replacement document, and
+  `REMOVE` changes a ReportClaim to `REMOVED` without deleting its identity.
+  It also removes section membership and citation assignments. A claim is
+  publishable only when it remains `INCLUDED`, Judge returns `SUPPORTED` or
+  `QUALIFIED`, it has no unresolved blocking finding, and its citations have no
+  structural error; `SUPPORTED` is legal only for
+  `STRUCTURALLY_SUPPORTED`. Each bounded round is Red then Blue then Judge.
+  Judge explicitly returns `FINALIZE` or `CONTINUE`, and continuation requires
+  a matching unresolved finding or frozen structural conflict. Pending evidence
+  acquisition alone cannot continue the frozen invocation. The maximum model
+  call count is `1 + 3 * max_rounds`.
+
+  Before publication, the service rechecks only the live stores' revision/hash
+  fingerprint through a narrow metadata boundary. Any difference raises
+  `verification_input_changed` and writes no artifact. Citation validation and
+  conflict derivation use only the frozen snapshot-backed stores.
+
+  Phase 6 first renders deterministic UTF-8/LF Markdown bytes and hashes them.
+  It then constructs and atomically writes authoritative `verification.json`,
+  followed by the already-rendered `report.md`. A crash after authority commit
+  is reconciled idempotently from the stored artifact. Replacing a different
+  verification identity requires explicit compare-and-swap intent. This is not
+  a WAL or round checkpoint.
+
+  Phase 6 reports structural verification and evidence-supported judgement,
+  not factual truth. It accepts an already-`VERIFYING` Run and reports actual
+  usage plus certainty. Phase 3 remains the sole owner of durable execution,
+  retry, checkpoints, and budget settlement; durable lifecycle integration is
+  deferred.
+- **Consequences:** Offline exact fixtures can reproduce a complete
+  synthesis/verification result, replay avoids provider calls, and publication
+  has one clear authority. New evidence acquisition is represented as a
+  request artifact only; it is not executed inside the frozen invocation.

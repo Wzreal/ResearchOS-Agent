@@ -149,6 +149,20 @@ class TraceEventType(StrEnum):
     CLAIM_RELATION_TOMBSTONED = "claim.relation_tombstoned"
     CLAIM_TRACE_FAILED = "claim.trace_failed"
     CLAIM_MUTATION_REPLAYED = "claim.mutation_replayed"
+    SYNTHESIS_STARTED = "synthesis.started"
+    SYNTHESIS_VALIDATED = "synthesis.validated"
+    SYNTHESIS_FAILED = "synthesis.failed"
+    VERIFICATION_STARTED = "verification.started"
+    VERIFICATION_RED_COMPLETED = "verification.red_completed"
+    VERIFICATION_BLUE_COMPLETED = "verification.blue_completed"
+    VERIFICATION_DRAFT_REVISED = "verification.draft_revised"
+    VERIFICATION_JUDGE_COMPLETED = "verification.judge_completed"
+    VERIFICATION_ROUND_COMPLETED = "verification.round_completed"
+    VERIFICATION_COMPLETED = "verification.completed"
+    VERIFICATION_FAILED = "verification.failed"
+    VERIFICATION_CANCELLED = "verification.cancelled"
+    VERIFICATION_PUBLICATION_REPLAYED = "verification.publication_replayed"
+    VERIFICATION_REPORT_RECONCILED = "verification.report_reconciled"
 
 
 class RunInput(ContractModel):

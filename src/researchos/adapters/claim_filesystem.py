@@ -27,6 +27,7 @@ from researchos.domain.claims import (
     ClaimRecord,
     ClaimRevision,
 )
+from researchos.domain.contracts import model_sha256
 from researchos.security.redaction import PersistenceRedactor
 
 FaultInjector = Callable[[str], None]
@@ -109,6 +110,10 @@ class FilesystemClaimGraphStore:
                 UnsafePersistenceData,
             ) as exc:
                 raise CorruptClaimGraph("claim graph snapshot is invalid") from exc
+
+    def snapshot_fingerprint(self, run_id: str) -> tuple[int, str]:
+        snapshot = self.load(run_id)
+        return snapshot.store_revision, model_sha256(snapshot)
 
     def save(self, snapshot: ClaimGraphSnapshot, *, expected_revision: int) -> None:
         self._validate(snapshot)

@@ -10,6 +10,7 @@ from researchos.application.errors import (
     EvidenceStoreNotFound,
     EvidenceStoreRevisionConflict,
 )
+from researchos.domain.contracts import model_sha256
 from researchos.domain.evidence import EvidenceStoreSnapshot
 from researchos.security.redaction import PersistenceRedactor
 
@@ -37,6 +38,14 @@ class InMemoryEvidenceStore:
         if snapshot.run_id != run_id:
             raise EvidenceStoreNotFound(run_id)
         return snapshot
+
+    def snapshot_fingerprint(self, run_id: str) -> tuple[int, str]:
+        with self._lock:
+            try:
+                snapshot = self._items[run_id]
+            except KeyError as exc:
+                raise EvidenceStoreNotFound(run_id) from exc
+            return snapshot.store_revision, model_sha256(snapshot)
 
     def save(self, snapshot: EvidenceStoreSnapshot, *, expected_revision: int) -> None:
         self._validate(snapshot)

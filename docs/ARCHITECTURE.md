@@ -306,6 +306,14 @@ terminal publication. Secret redaction happens before persistence.
 8. Evaluation reads frozen artifacts; finalization writes the manifest and
    exposes complete, partial, or failed status.
 
+Phase 6 freezes the Phase 5 Claim Graph and Evidence Store once per invocation.
+It admits only whole Claim/Evidence items, derives structural support from the
+frozen current edges, and runs a provider-independent Synthesizer followed by
+bounded Red/Blue/Judge rounds. It writes authoritative `verification.json` before
+the deterministic `report.md` projection. The phase returns usage and certainty
+but does not own durable scheduling, retries, checkpoints, Run transitions, or
+budget settlement.
+
 ## Failure and recovery model
 
 - Expected operational failures are typed data, not swallowed exceptions.

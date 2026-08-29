@@ -228,3 +228,42 @@ class ClaimGraphTraceCommitError(ResearchOSError):
 
 class ClaimGraphPreconditionError(ResearchOSError):
     pass
+
+
+class VerificationPreconditionError(ResearchOSError):
+    pass
+
+
+class VerificationModelFailure(ResearchOSError):
+    pass
+
+
+class VerificationCancelled(ResearchOSError):
+    pass
+
+
+class VerificationDeadlineExceeded(ResearchOSError):
+    pass
+
+
+class VerificationContractError(ResearchOSError):
+    pass
+
+
+class VerificationArtifactConflict(ResearchOSError):
+    pass
+
+
+class VerificationInputChanged(ResearchOSError):
+    pass
+
+
+class VerificationUsageUncertain(ResearchOSError):
+    pass
+
+
+class VerificationPersistenceError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, artifact_replaced: bool) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.artifact_replaced = artifact_replaced

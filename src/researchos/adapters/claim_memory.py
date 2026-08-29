@@ -11,6 +11,7 @@ from researchos.application.errors import (
     CorruptClaimGraph,
 )
 from researchos.domain.claims import ClaimGraphSnapshot
+from researchos.domain.contracts import model_sha256
 from researchos.security.redaction import PersistenceRedactor
 
 
@@ -37,6 +38,14 @@ class InMemoryClaimGraphStore:
         if snapshot.run_id != run_id:
             raise ClaimGraphNotFound(run_id)
         return snapshot
+
+    def snapshot_fingerprint(self, run_id: str) -> tuple[int, str]:
+        with self._lock:
+            try:
+                snapshot = self._items[run_id]
+            except KeyError as exc:
+                raise ClaimGraphNotFound(run_id) from exc
+            return snapshot.store_revision, model_sha256(snapshot)
 
     def save(self, snapshot: ClaimGraphSnapshot, *, expected_revision: int) -> None:
         self._validate(snapshot)
