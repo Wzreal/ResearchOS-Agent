@@ -18,6 +18,7 @@ from researchos.application.errors import (
     EvidenceStoreRevisionConflict,
     UnsafePersistenceData,
 )
+from researchos.domain.contracts import model_sha256
 from researchos.domain.evidence import (
     EVIDENCE_SCHEMA_VERSION,
     EvidenceRecord,
@@ -105,6 +106,10 @@ class FilesystemEvidenceStore:
                 UnsafePersistenceData,
             ) as exc:
                 raise CorruptEvidenceStore("evidence snapshot is invalid") from exc
+
+    def snapshot_fingerprint(self, run_id: str) -> tuple[int, str]:
+        snapshot = self.load(run_id)
+        return snapshot.store_revision, model_sha256(snapshot)
 
     def save(self, snapshot: EvidenceStoreSnapshot, *, expected_revision: int) -> None:
         self._validate(snapshot)

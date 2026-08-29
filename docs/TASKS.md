@@ -97,10 +97,18 @@ not aspiration.
 
 ## Phase 6 — Synthesis and bounded verification
 
-- TODO — Implement evidence-grounded synthesis contract and adapter.
-- TODO — Implement Red, Blue, and Judge roles with structured outcomes.
-- TODO — Enforce correction-round and resource budgets.
-- TODO — Surface unsupported and unresolved claims in report output.
+- DONE — Implement frozen, whole-item evidence-grounded synthesis contracts
+  and deterministic mock adapter.
+- DONE — Implement bounded Red, Blue, and Judge roles with stable structured
+  identities, action validation, and derived structural support.
+- DONE — Enforce rounds, claims, findings, evidence, bytes, hard limits,
+  deadline, and cancellation without adding a second runtime or budget ledger.
+- DONE — Publish authoritative verification JSON before deterministic Markdown,
+  support zero-model-call replay, and preserve removed/unresolved claim state.
+- DONE — Harden PR #7 current-valid edge semantics, Judge-owned finding
+  dispositions, finding-bound Blue actions, citation completeness, reentrant
+  coordination, authoritative round audit data, Markdown ownership, and
+  committed-state error reporting.
 
 ## Phase 7 — Evaluation harness
 
