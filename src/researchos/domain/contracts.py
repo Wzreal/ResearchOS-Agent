@@ -136,6 +136,19 @@ class TraceEventType(StrEnum):
     TOOL_INVOCATION_CANCELLED = "tool.invocation_cancelled"
     TOOL_INVOCATION_TIMED_OUT = "tool.invocation_timed_out"
     TOOL_PERMISSION_DENIED = "tool.permission_denied"
+    EVIDENCE_INGESTED = "evidence.ingested"
+    EVIDENCE_REPLAYED = "evidence.replayed"
+    EVIDENCE_REVISED = "evidence.revised"
+    EVIDENCE_TOMBSTONED = "evidence.tombstoned"
+    EVIDENCE_TRACE_FAILED = "evidence.trace_failed"
+    CLAIM_CREATED = "claim.created"
+    CLAIM_REVISED = "claim.revised"
+    CLAIM_TOMBSTONED = "claim.tombstoned"
+    CLAIM_RELATION_CREATED = "claim.relation_created"
+    CLAIM_RELATION_REVISED = "claim.relation_revised"
+    CLAIM_RELATION_TOMBSTONED = "claim.relation_tombstoned"
+    CLAIM_TRACE_FAILED = "claim.trace_failed"
+    CLAIM_MUTATION_REPLAYED = "claim.mutation_replayed"
 
 
 class RunInput(ContractModel):

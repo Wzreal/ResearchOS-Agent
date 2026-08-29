@@ -493,3 +493,96 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   explicit but Phase 4 provides no cross-process exactly-once guarantee.
   Durable Tool deduplication, real LLM/browser/search providers, hostile-code
   isolation, Evidence Memory, claims, and synthesis remain later-phase work.
+
+## ADR-0021: Separate stable evidence/claim identity from revisions and runtime occurrence
+
+- **Status:** Accepted
+- **Date:** 2026-08-28
+- **Context:** Phase 5 must retain evidence produced by retryable Agent/Tool
+  execution without making mutable content or attempt identity the entity key.
+  It also needs recoverable local persistence while avoiding a database, WAL,
+  event-sourcing architecture, or Phase 6 truth judgement.
+- **Scope note:** This ADR intentionally consolidates the three Phase 5
+  decisions originally planned as ADR-0021 (identity and revision), ADR-0022
+  (snapshot persistence and crash boundaries), and ADR-0023 (Agent observation
+  ingestion and trace ordering). They share the same canonical identity,
+  immutable revision, and receipt-replay invariant; recording them together
+  prevents incompatible partial decisions while the separate paragraphs below
+  retain all three decision boundaries.
+- **Decision:** A source is identified by run, source type, and canonical
+  locator. Evidence is identified by run, source ID, immutable
+  extractor-specific scope, and media type. Browser page bodies use the fixed
+  `browser-page-body-v1` scope. Local chunks hash `local-chunk-v1`, document
+  ID, and chunk ID. Search snippets hash `search-snippet-v1`, the safe canonical
+  Tool-input hash, and a source-native snippet locator, with a canonical-source
+  and normalized-snippet-hash fallback. Rank, attempt ID, attempt number, and
+  model Tool-call ID never participate.
+
+  `EvidenceRevision` represents changed content or extraction context.
+  `IngestionReceipt` represents runtime occurrence provenance. The stable
+  idempotency payload excludes occurrence fields. Retrying the same logical
+  result with another attempt/Tool-call ID therefore reuses the evidence and
+  writes a distinct receipt. Different result content changes the canonical
+  request hash and ingestion operation identity; if source/scope are unchanged
+  it creates an evidence revision rather than an idempotency conflict.
+
+  `text-nfc-lines-v1` normalization applies Unicode NFC, normalizes CRLF/CR to
+  LF, removes trailing spaces/tabs per line, and removes outer blank lines. It
+  does not case-fold or collapse internal whitespace, and the original content
+  remains immutable. Web source canonicalization lowercases scheme/host,
+  removes fragments and default ports, and supplies `/` for an empty path. The
+  raw query component is opaque: order, duplicates, and encoding are preserved.
+
+  A claim ID hashes run and immutable `claim_scope_key`; normalized statement
+  hash serves only content comparison and duplicate discovery. An edge ID
+  hashes run, claim, and evidence. Exactly one current relation is permitted
+  per claim/evidence pair, with relation changes represented as immutable edge
+  revisions. Tombstones retain history. Conflict reporting nominates current
+  support/contradiction sets but does not decide truth.
+
+  Repeating `create_claim` for the same scope and normalized statement returns
+  the current revision. Repeating it with different statement content appends
+  the next revision to the same claim identity; explicit CAS-based
+  `revise_claim` remains available. Generation context is revision provenance
+  only. Before evidence ingestion, the Agent backend orders observations by
+  Agent step and Tool-call ID so adapter output order cannot affect ingestion
+  order.
+
+  Phase 5 uses separate deterministic whole-file JSONL snapshots at
+  `outputs/<run_id>/evidence.jsonl` and `claims.jsonl`. Each has a schema/store
+  revision header, record count, canonical payload hash, and sorted records.
+  Writes use a same-directory temporary file, file fsync, atomic replace, and
+  parent-directory fsync where supported. Stores use compare-and-swap
+  revisions, validate run/cross-record identity, and reject models requiring
+  redaction. There is one application writer per run; this is not a WAL,
+  transaction log, append log, or event source.
+
+  Snapshot validation fails closed unless every entity revision chain is
+  continuous from 1 through its maximum/current pointer, every predecessor and
+  receipt target exists, edge claim-revision pins belong to the edge's claim,
+  and mutation receipt/replay identities are unambiguous. Evidence references
+  that require the separate Evidence Store remain joint service/validator
+  checks rather than a fabricated cross-store transaction.
+
+  Agent terminal results retain validated observations. The task backend
+  extracts/ingests every eligible successful observation before mapping the
+  Agent terminal result, even when that result is failure. Evidence/claim state
+  is authoritative once the snapshot commits. A subsequent semantic trace
+  append failure raises a typed `store_committed` failure, does not roll back
+  state, and is safe to replay through receipts. Trace attributes contain only
+  IDs, hashes, revisions, disposition/relation, and store revision.
+
+  Citation integrity is structural. Dangling source/claim/evidence references,
+  identity or content-hash mismatch, and nonexistent revisions are errors.
+  Superseded but still addressable immutable revisions and tombstoned current
+  entities are warnings and do not make the result invalid. Citation IDs are
+  stable within a validation request; reusing one ID for a different reference
+  is a structural error. Each citation also pins `source_id` and the expected
+  evidence content hash, which must match the selected immutable evidence
+  revision before a citation is structurally valid.
+- **Consequences:** Task retries preserve logical evidence identity and honest
+  runtime provenance, while claim and edge history remain stable under content
+  changes. Local recovery can detect torn/corrupt snapshots without choosing a
+  database. Multi-process leases, a general trace reconciliation outbox,
+  evidence quality/truth scoring, synthesis, verification, and physical
+  compaction are deferred to later phases.

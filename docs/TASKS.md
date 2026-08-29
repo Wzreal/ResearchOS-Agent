@@ -78,10 +78,22 @@ not aspiration.
 
 ## Phase 5 — Evidence Memory and Claim-Evidence Graph
 
-- TODO — Define evidence, source, claim, edge, and revision schemas.
-- TODO — Implement local persistence, hashing, and deduplication.
-- TODO — Implement typed claim-evidence relationships and graph queries.
-- TODO — Implement conflict-candidate detection and citation integrity checks.
+- DONE — Define evidence, source, claim, edge, receipt, and immutable revision
+  schemas with stable entity identity.
+- DONE — Implement defensive in-memory and atomic deterministic JSONL snapshot
+  stores, canonical hashing, deduplication, and revision semantics.
+- DONE — Implement trusted Browser/Search/Local Retrieval extraction and ingest
+  eligible successful observations before final Agent-result mapping.
+- DONE — Implement typed claim-evidence relationships, bounded graph queries,
+  tombstones, conflict-candidate detection, and structural citation integrity.
+- DONE — Add Phase 5 persistence, idempotency, provenance, trace-failure,
+  integration, staleness, and corruption tests plus GitHub reference review.
+- DONE — Complete the Phase 5 semantic/test-coverage audit, current-valid
+  conflict hardening, defensive snapshot validation, and failed-Agent
+  observation retention checks.
+- DONE — Harden PR #6 portability, conservative URL/text identity, citation
+  source/content pinning, snapshot/receipt invariants, claim-create revision
+  semantics, and deterministic backend ingestion ordering.
 
 ## Phase 6 — Synthesis and bounded verification
 

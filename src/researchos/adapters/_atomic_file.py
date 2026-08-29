@@ -14,17 +14,21 @@ class AtomicWriteFailure(Exception):
         self.replaced = replaced
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def fsync_parent(path: Path) -> None:
     try:
         descriptor = os.open(path, os.O_RDONLY)
     except OSError:
-        if os.name == "nt":
+        if _is_windows():
             return
         raise
     try:
         os.fsync(descriptor)
     except OSError:
-        if os.name != "nt":
+        if not _is_windows():
             raise
     finally:
         os.close(descriptor)
