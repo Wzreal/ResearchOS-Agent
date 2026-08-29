@@ -261,8 +261,9 @@ Verification operates on claims and evidence rather than free-form transcripts:
 - Judge records a structured disposition and allowed correction;
 - a verification policy caps rounds, time, tokens, cost, and new tool calls.
 
-Unresolved conflict is an output state, not an exception to hide. These roles
-are not implemented in Phase 0.
+Unresolved conflict is an output state, not an exception to hide. Phase 6
+implements these roles through one provider-independent model port and an
+invocation-local, bounded coordinator; it is not a second Agent runtime.
 
 ### 8. Evaluation
 
@@ -308,11 +309,18 @@ terminal publication. Secret redaction happens before persistence.
 
 Phase 6 freezes the Phase 5 Claim Graph and Evidence Store once per invocation.
 It admits only whole Claim/Evidence items, derives structural support from the
-frozen current edges, and runs a provider-independent Synthesizer followed by
+single fail-closed current-valid-edge helper, and runs a provider-independent Synthesizer followed by
 bounded Red/Blue/Judge rounds. It writes authoritative `verification.json` before
 the deterministic `report.md` projection. The phase returns usage and certainty
 but does not own durable scheduling, retries, checkpoints, Run transitions, or
 budget settlement.
+
+Blue proposes one action per open finding; only Judge owns finding disposition.
+Citation assignments pin current-valid edge IDs and relations, and runtime
+completeness checks prevent a zero-citation Claim from being published as
+SUPPORTED. The authority records full draft and round lineage plus a canonical
+artifact hash. Markdown prose is escaped plain text, leaving citation syntax
+under deterministic runtime ownership.
 
 ## Failure and recovery model
 

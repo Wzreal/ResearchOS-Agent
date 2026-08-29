@@ -12,6 +12,7 @@ from researchos.application.errors import (
     VerificationCancelled,
     VerificationInputChanged,
     VerificationPreconditionError,
+    VerificationTraceCommitError,
 )
 from researchos.application.verification_coordinator import (
     VerificationCoordinator,
@@ -31,9 +32,10 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
-from researchos.domain.identity import stable_id
+from researchos.domain.identity import stable_hash, stable_id
 from researchos.domain.runtime import RuntimeResourceAmount
 from researchos.domain.synthesis import (
+    CitationAssignment,
     JudgeVerdict,
     VerificationPolicy,
     VerificationResult,
@@ -104,6 +106,10 @@ class VerificationService:
             raise VerificationArtifactConflict(
                 "expected prior verification identity differs"
             )
+        if existing is None and expected_prior_verification_id is not None:
+            raise VerificationArtifactConflict(
+                "expected prior verification artifact is absent"
+            )
 
         self._emit(
             run_state,
@@ -126,6 +132,8 @@ class VerificationService:
                 usage,
                 certainty,
                 bounds_exhausted,
+                round_records,
+                termination_reason,
             ) = await self._coordinator.execute(
                 verification_id=verification_id,
                 frozen=frozen,
@@ -207,6 +215,9 @@ class VerificationService:
             findings=findings,
             resolved_finding_ids=resolved_finding_ids,
             citation_issues=citation_result.issues,
+            disposition=disposition,
+            acquisition_requests=acquisitions,
+            omitted_claim_ids=frozen.omitted_claim_ids,
         )
         if len(markdown) > policy.max_report_bytes:
             self._emit(
@@ -216,7 +227,23 @@ class VerificationService:
                 {"failure_code": "report_bound_exceeded"},
             )
             raise VerificationPreconditionError("report exceeds configured byte limit")
-        result = VerificationResult(
+        report_claims_by_claim = {item.claim_id: item for item in draft.report_claims}
+        current_edges = {
+            (item.edge.claim_id, item.edge.evidence_id): item
+            for item in frozen.current_valid_edges
+        }
+        citation_assignments = tuple(
+            CitationAssignment(
+                report_claim_id=report_claims_by_claim[item.claim_id].report_claim_id,
+                citation=item,
+                edge_id=current_edges[(item.claim_id, item.evidence_id)].edge.edge_id,
+                relation=current_edges[
+                    (item.claim_id, item.evidence_id)
+                ].revision.relation,
+            )
+            for item in sorted(draft.citations, key=lambda item: item.citation_id)
+        )
+        result_data = dict(
             verification_id=verification_id,
             synthesis_id=draft.synthesis_id,
             run_id=run_state.run_id,
@@ -224,6 +251,12 @@ class VerificationService:
             frozen_input_hash=frozen.frozen_input_hash,
             claim_snapshot_hash=frozen.claim_snapshot_hash,
             evidence_snapshot_hash=frozen.evidence_snapshot_hash,
+            claim_store_revision=frozen.claim_snapshot.store_revision,
+            evidence_store_revision=frozen.evidence_snapshot.store_revision,
+            selected_claim_ids=frozen.selected_claim_ids,
+            omitted_claim_ids=frozen.omitted_claim_ids,
+            selected_evidence_ids=frozen.selected_evidence_ids,
+            omitted_evidence_ids=frozen.omitted_evidence_ids,
             policy_hash=model_sha256(policy),
             model_bundle_hash=self._coordinator.model_bundle_hash,
             supersedes_verification_id=(
@@ -236,12 +269,24 @@ class VerificationService:
             resolved_finding_ids=resolved_finding_ids,
             acquisition_requests=acquisitions,
             judge_decisions=decisions,
+            citation_assignments=citation_assignments,
+            round_records=round_records,
             citation_issues=citation_result.issues,
             disposition=disposition,
+            termination_reason=termination_reason,
             markdown_sha256=hashlib.sha256(markdown).hexdigest(),
             usage=usage,
             usage_certainty=certainty,
             completed_at=self._clock.now(),
+        )
+        provisional = VerificationResult.model_construct(
+            **result_data, artifact_content_hash="0" * 64
+        )
+        result = VerificationResult(
+            **result_data,
+            artifact_content_hash=stable_hash(
+                provisional.model_dump(mode="json", exclude={"artifact_content_hash"})
+            ),
         )
         self._redactor.assert_safe_model(result)
         if len(canonical_json_bytes(result)) > policy.max_verification_artifact_bytes:
@@ -268,18 +313,25 @@ class VerificationService:
                 {"failure_code": type(exc).__name__},
             )
             raise
-        self._emit(
-            run_state,
-            TraceEventType.VERIFICATION_COMPLETED,
-            verification_id,
-            {
-                "disposition": disposition.value,
-                "draft_revision_id": draft.draft_revision_id,
-                "markdown_sha256": result.markdown_sha256,
-                "finding_count": len(findings),
-                "usage_certainty": certainty.value,
-            },
-        )
+        try:
+            self._emit(
+                run_state,
+                TraceEventType.VERIFICATION_COMPLETED,
+                verification_id,
+                {
+                    "disposition": disposition.value,
+                    "draft_revision_id": draft.draft_revision_id,
+                    "markdown_sha256": result.markdown_sha256,
+                    "finding_count": len(findings),
+                    "usage_certainty": certainty.value,
+                },
+            )
+        except Exception as exc:
+            raise VerificationTraceCommitError(
+                "verification completion trace append failed",
+                run_id=run_state.run_id,
+                verification_id=verification_id,
+            ) from exc
         return result
 
     def _emit(

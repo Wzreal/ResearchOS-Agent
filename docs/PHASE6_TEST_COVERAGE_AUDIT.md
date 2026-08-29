@@ -14,6 +14,8 @@ is limited to an explicitly later-phase integration. No P0/P1 gap remains.
 | Frozen input isolation | Later live mutation cannot change role context | `test_frozen_role_context_is_unchanged_by_later_live_mutation` | COVERED | None |
 | Publication fingerprint guard | Narrow revision/hash boundary rejects changed input | `test_snapshot_change_after_freeze_prevents_publication` | FIXED | None |
 | Snapshot citation/conflict processing | Snapshot-backed validator and pure frozen conflict derivation | load-count and Phase 5 citation tests | COVERED | None |
+| Current-valid edge semantics | One helper requires current ACTIVE edge/entity revisions and never upgrades stale pins | stale Claim, stale Evidence, stale conflict, dangling-edge tests in `test_phase6_pr7_hardening.py` | FIXED | None |
+| Dangling cross-store edge | Missing Evidence/entity revision raises typed input corruption | `test_dangling_cross_store_edge_fails_closed` | FIXED | None |
 | Whole Claim/Evidence admission | Complete record+revision accepted or omitted | `test_whole_item_exact_and_one_byte_boundaries` | COVERED | None |
 | Omission set invariants | Deterministic, disjoint selected/omitted sets; omitted linked evidence retained | whole-item tests | FIXED | None |
 | Omission affects disposition | Omission prevents VERIFIED | `test_all_final_dispositions` | COVERED | None |
@@ -30,9 +32,12 @@ is limited to an explicitly later-phase integration. No P0/P1 gap remains.
 | Red finding contracts | All four types and required/forbidden pins | `test_all_red_finding_types_accept_valid_pins` and contract tests | COVERED | None |
 | Red frozen pin authorization | Invented and wrong-Claim pins rejected | invented-pin and cross-Claim citation tests | FIXED | None |
 | Blue action coverage | KEEP/QUALIFY/REMOVE/ADD/REQUEST independently exercised | `test_every_blue_action_has_bounded_effect` | COVERED | None |
+| Blue finding binding | Exactly one action per open finding; cross-Claim binding rejected; multiple findings per Claim allowed | `test_blue_actions_bind_each_open_finding_and_allow_same_claim` | FIXED | None |
+| Judge-owned finding disposition | Blue never resolves; Judge dispositions exact open set; stable finding can reopen | continued-round tests and `test_repeated_stable_finding_is_reopened_for_current_round` | FIXED | None |
 | Blue authority boundary | No full draft, invented citation, conflict, Tool/store mutation | Blue contract/action tests | FIXED | None |
 | Judge boundary | Exact current draft, exact Claim set, no prose/evidence/action fields | Judge stale/content tests | FIXED | None |
 | SUPPORTED constraint | Only STRUCTURALLY_SUPPORTED can be SUPPORTED | Phase 6 contract tests | COVERED | None |
+| Citation completeness/relation | SUPPORTED/QUALIFIED require current SUPPORTS; conflicted QUALIFIED discloses CONTRADICTS | zero-citation and relation tests | FIXED | None |
 | Bounded loop | Synthesizer plus at most three calls per round | continue/finalize and max-round tests | FIXED | None |
 | Finding quota/deduplication | Unique stable findings consume quota; exhaustion is non-VERIFIED | max-finding and duplicate-round tests | FIXED | None |
 | Acquisition cannot drive CONTINUE | Continue reason must match open finding or frozen conflict | pending-acquisition test | FIXED | None |
@@ -42,15 +47,24 @@ is limited to an explicitly later-phase integration. No P0/P1 gap remains.
 | Role success and failure | All roles succeed in E2E and fail once without internal retry | provider/malformed parametrized tests | COVERED | None |
 | Role cancellation/deadline | Before/after dispatch and never-return timeout for every role | role-parametrized async tests | COVERED | None |
 | Usage certainty | EXACT/UPPER_BOUND aggregate; UNKNOWN stops or terminates at Judge | usage certainty tests | FIXED | None |
+| Judge UNKNOWN + CONTINUE | Stops before the next Red call | `test_unknown_judge_continue_stops_before_next_red` | FIXED | None |
+| Coordinator reentrancy | Invocation-local usage/certainty/mode/trace state | `test_same_coordinator_is_reentrant_across_runs_and_modes` | FIXED | None |
 | Budget ownership | RunState budget remains immutable; no second ledger exists | known-usage test and architecture inspection | COVERED | None |
 | Exact mock fixtures | verification/role/round/draft key, missing key and response mismatch fail | mock fixture and identity tests | FIXED | None |
 | No real fallback | Mock adapter rejects REAL and missing fixtures | mock adapter tests | COVERED | None |
 | Publication order | Render/hash, artifact bound, JSON atomic replace, report atomic replace, trace | filesystem/fault tests | COVERED | None |
+| Authoritative audit envelope | Store revisions, selections, all drafts/rounds, assignments, termination, usage and content hash persisted | `test_authoritative_result_persists_round_and_selection_audit_data` | FIXED | None |
+| Authority tamper/same-ID conflict | Canonical hash detects tamper; differing same-ID result cannot rewrite report | `test_same_id_different_artifact_conflicts_and_tamper_is_detected` | FIXED | None |
+| Commit-state errors | Authority/report/artifact booleans and post-publication trace error are typed | report-failure and completion-trace tests | FIXED | None |
 | Crash boundaries | Pre-authority retry may rerun; post-authority retry makes zero calls | parametrized publication fault tests | COVERED | None |
 | Report reconciliation | Missing/corrupt report rebuilt without authority mutation/model call | reconciliation tests | COVERED | None |
 | Deterministic output | Canonical JSON, UTF-8/LF, one final newline, exact SHA/order | deterministic publication test | COVERED | None |
+| Markdown citation ownership | Model title/prose escaped; only runtime writes citation definitions | `test_model_markdown_citation_injection_is_plain_text_only` | FIXED | None |
+| Draft parent identity | Parent revision participates in stable draft ID | `test_draft_identity_binds_parent` | FIXED | None |
+| Report disclosure | Disposition, conflicts, omitted/unresolved Claims, and acquisition requests are visible | deterministic publication and disclosure tests | FIXED | None |
 | Same-ID replay | Authority loaded and report reconciled with zero calls | replay and completion-trace tests | COVERED | None |
 | New verification CAS | Prior ID required; supersedes identity recorded | `test_same_id_reconcile_and_new_verification_cas` | FIXED | None |
+| Missing-prior CAS timing | Absent expected authority fails before every model call | `test_expected_prior_absence_fails_before_model_calls` | FIXED | None |
 | Trace safety | Only IDs/hashes/enums/counts/codes; no prose/content/locator/payload/secrets | trace leakage and provider-failure tests | COVERED | None |
 | Phase 3 ownership regression | Executor, scheduler, checkpoint, and durable ledger behavior unchanged | Git diff inspection plus full regression suite | COVERED | None |
 | Phase 5 semantic regression | Identity/revision contracts unchanged; only fingerprint reads added | Git diff inspection plus full Phase 5 suite | COVERED | None |

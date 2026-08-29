@@ -105,6 +105,10 @@ not aspiration.
   deadline, and cancellation without adding a second runtime or budget ledger.
 - DONE — Publish authoritative verification JSON before deterministic Markdown,
   support zero-model-call replay, and preserve removed/unresolved claim state.
+- DONE — Harden PR #7 current-valid edge semantics, Judge-owned finding
+  dispositions, finding-bound Blue actions, citation completeness, reentrant
+  coordination, authoritative round audit data, Markdown ownership, and
+  committed-state error reporting.
 
 ## Phase 7 — Evaluation harness
 

@@ -11,8 +11,10 @@ from pydantic import Field, StringConstraints, field_validator, model_validator
 from researchos.domain.claims import (
     CitationIntegrityIssue,
     CitationReference,
+    ClaimEvidenceRelation,
     ClaimGraphSnapshot,
     ConflictCandidate,
+    EdgeView,
 )
 from researchos.domain.contracts import (
     ContractModel,
@@ -75,6 +77,17 @@ class JudgeRoundAction(StrEnum):
     CONTINUE = "continue"
 
 
+class FindingDisposition(StrEnum):
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+
+
+class VerificationTerminationReason(StrEnum):
+    JUDGE_FINALIZED = "judge_finalized"
+    MAX_ROUNDS = "max_rounds"
+    MAX_FINDINGS = "max_findings"
+
+
 class JudgeContinueReason(StrEnum):
     OPEN_FINDINGS = "open_findings"
     STRUCTURAL_CONFLICT = "structural_conflict"
@@ -117,6 +130,7 @@ class FrozenVerificationInput(ContractModel):
     selected_evidence_ids: tuple[SafeId, ...] = ()
     omitted_evidence_ids: tuple[SafeId, ...] = ()
     allowed_citations: tuple[CitationReference, ...] = ()
+    current_valid_edges: tuple[EdgeView, ...] = ()
     conflict_candidates: tuple[ConflictCandidate, ...] = ()
     frozen_input_hash: Sha256
 
@@ -260,7 +274,12 @@ class ReportDraftRevision(ContractModel):
             raise ValueError("draft content hash differs")
         if self.draft_revision_id != stable_id(
             "draft",
-            [self.synthesis_id, self.revision_number, self.canonical_content_hash],
+            [
+                self.synthesis_id,
+                self.revision_number,
+                self.parent_revision_id,
+                self.canonical_content_hash,
+            ],
         ):
             raise ValueError("draft revision identity differs")
         return self
@@ -296,6 +315,20 @@ class RedCandidateFinding(ContractModel):
     citation_id: SafeId | None = None
     evidence_id: SafeId | None = None
 
+    @model_validator(mode="after")
+    def pins_match_type(self) -> RedCandidateFinding:
+        if (
+            self.finding_type is FindingType.CONTRADICTORY_EVIDENCE
+            and not self.evidence_id
+        ):
+            raise ValueError("contradictory evidence finding requires evidence_id")
+        if (
+            self.finding_type is FindingType.CITATION_GAP
+            and self.citation_id is not None
+        ):
+            raise ValueError("citation gap must not pin a citation")
+        return self
+
 
 class RedResponse(ContractModel):
     findings: tuple[RedCandidateFinding, ...] = ()
@@ -304,7 +337,7 @@ class RedResponse(ContractModel):
 class BlueAction(ContractModel):
     action: BlueActionType
     report_claim_id: SafeId
-    finding_id: SafeId | None = None
+    finding_id: SafeId
     qualified_prose: Prose | None = None
     evidence_id: SafeId | None = None
     reason: ShortText | None = None
@@ -330,7 +363,7 @@ class BlueResponse(ContractModel):
 class AcquisitionRequest(ContractModel):
     acquisition_request_id: SafeId
     report_claim_id: SafeId
-    finding_id: SafeId | None = None
+    finding_id: SafeId
     claim_id: SafeId
     reason: ShortText
 
@@ -340,11 +373,17 @@ class JudgeDecision(ContractModel):
     verdict: JudgeVerdict
 
 
+class FindingDispositionDecision(ContractModel):
+    finding_id: SafeId
+    disposition: FindingDisposition
+
+
 class JudgeResponse(ContractModel):
     draft_revision_id: SafeId
     action: JudgeRoundAction = JudgeRoundAction.FINALIZE
     continue_reason: JudgeContinueReason | None = None
     decisions: tuple[JudgeDecision, ...]
+    finding_dispositions: tuple[FindingDispositionDecision, ...]
 
     @model_validator(mode="after")
     def continuation_is_explicit(self) -> JudgeResponse:
@@ -355,6 +394,26 @@ class JudgeResponse(ContractModel):
         return self
 
 
+class CitationAssignment(ContractModel):
+    report_claim_id: SafeId
+    citation: CitationReference
+    edge_id: SafeId
+    relation: ClaimEvidenceRelation
+
+
+class VerificationRoundRecord(ContractModel):
+    round_number: int = Field(ge=1)
+    input_draft_revision_id: SafeId
+    red_findings: tuple[RedFinding, ...]
+    open_findings: tuple[RedFinding, ...]
+    blue_actions: tuple[BlueAction, ...]
+    output_draft_revision_id: SafeId
+    judge_decisions: tuple[JudgeDecision, ...]
+    finding_dispositions: tuple[FindingDispositionDecision, ...]
+    judge_action: JudgeRoundAction
+    continue_reason: JudgeContinueReason | None = None
+
+
 class VerificationResult(ContractModel):
     verification_id: SafeId
     synthesis_id: SafeId
@@ -363,6 +422,12 @@ class VerificationResult(ContractModel):
     frozen_input_hash: Sha256
     claim_snapshot_hash: Sha256
     evidence_snapshot_hash: Sha256
+    claim_store_revision: int = Field(ge=0)
+    evidence_store_revision: int = Field(ge=0)
+    selected_claim_ids: tuple[SafeId, ...]
+    omitted_claim_ids: tuple[SafeId, ...]
+    selected_evidence_ids: tuple[SafeId, ...]
+    omitted_evidence_ids: tuple[SafeId, ...]
     policy_hash: Sha256
     model_bundle_hash: Sha256
     supersedes_verification_id: SafeId | None = None
@@ -373,12 +438,16 @@ class VerificationResult(ContractModel):
     resolved_finding_ids: tuple[SafeId, ...] = ()
     acquisition_requests: tuple[AcquisitionRequest, ...]
     judge_decisions: tuple[JudgeDecision, ...]
+    citation_assignments: tuple[CitationAssignment, ...]
+    round_records: tuple[VerificationRoundRecord, ...]
     citation_issues: tuple[CitationIntegrityIssue, ...]
     disposition: VerificationDisposition
+    termination_reason: VerificationTerminationReason
     markdown_sha256: Sha256
     usage: RuntimeResourceAmount
     usage_certainty: UsageCertainty
     completed_at: datetime
+    artifact_content_hash: Sha256
 
     _aware = field_validator("completed_at")(_require_aware)
 
@@ -417,7 +486,23 @@ class VerificationResult(ContractModel):
             raise ValueError("final draft revision ID differs")
         if self.final_draft != ordered[-1]:
             raise ValueError("final draft is not the final lineage revision")
+        if set(self.selected_claim_ids) & set(self.omitted_claim_ids):
+            raise ValueError("selected and omitted claims overlap")
+        if set(self.selected_evidence_ids) & set(self.omitted_evidence_ids):
+            raise ValueError("selected and omitted evidence overlap")
         claims = {item.report_claim_id: item for item in self.final_draft.report_claims}
+        citation_ids = {item.citation_id for item in self.final_draft.citations}
+        assignment_ids = [
+            item.citation.citation_id for item in self.citation_assignments
+        ]
+        if set(assignment_ids) != citation_ids or len(assignment_ids) != len(
+            set(assignment_ids)
+        ):
+            raise ValueError("citation assignments must cover final citations exactly")
+        if any(
+            item.report_claim_id not in claims for item in self.citation_assignments
+        ):
+            raise ValueError("citation assignment references missing report claim")
         for decision in self.judge_decisions:
             claim = claims.get(decision.report_claim_id)
             if claim is None:
@@ -428,6 +513,11 @@ class VerificationResult(ContractModel):
                 is not StructuralSupport.STRUCTURALLY_SUPPORTED
             ):
                 raise ValueError("SUPPORTED requires STRUCTURALLY_SUPPORTED")
+        decision_ids = [item.report_claim_id for item in self.judge_decisions]
+        if set(decision_ids) != set(claims) or len(decision_ids) != len(
+            set(decision_ids)
+        ):
+            raise ValueError("final Judge decisions must cover report claims exactly")
         for finding in self.findings:
             if finding.report_claim_id not in claims:
                 raise ValueError("finding references missing report claim")
@@ -458,6 +548,87 @@ class VerificationResult(ContractModel):
             )
             if request.acquisition_request_id != expected:
                 raise ValueError("acquisition request identity differs")
+        if tuple(item.round_number for item in self.round_records) != tuple(
+            range(1, len(self.round_records) + 1)
+        ):
+            raise ValueError("round records must be continuous")
+        if not self.round_records:
+            raise ValueError("verification requires a completed Judge round")
+        if len(ordered) != len(self.round_records) + 1:
+            raise ValueError("draft and round lineage lengths differ")
+        for index, record in enumerate(self.round_records):
+            if record.input_draft_revision_id != ordered[index].draft_revision_id:
+                raise ValueError("round input draft lineage differs")
+            if record.output_draft_revision_id != ordered[index + 1].draft_revision_id:
+                raise ValueError("round output draft lineage differs")
+            record_findings = {item.finding_id for item in record.open_findings}
+            disposition_ids = [item.finding_id for item in record.finding_dispositions]
+            if set(disposition_ids) != record_findings or len(disposition_ids) != len(
+                set(disposition_ids)
+            ):
+                raise ValueError("Judge must disposition round findings exactly once")
+            action_ids = [item.finding_id for item in record.blue_actions]
+            if set(action_ids) != record_findings or len(action_ids) != len(
+                set(action_ids)
+            ):
+                raise ValueError("Blue must act on round findings exactly once")
+            finding_claims = {
+                item.finding_id: item.report_claim_id for item in record.open_findings
+            }
+            if any(
+                item.report_claim_id != finding_claims[item.finding_id]
+                for item in record.blue_actions
+            ):
+                raise ValueError("Blue action and finding Claim differ")
+            output_claim_ids = {
+                item.report_claim_id for item in ordered[index + 1].report_claims
+            }
+            round_decision_ids = [
+                item.report_claim_id for item in record.judge_decisions
+            ]
+            if set(round_decision_ids) != output_claim_ids or len(
+                round_decision_ids
+            ) != len(set(round_decision_ids)):
+                raise ValueError("round Judge decisions must cover output Claims")
+        if self.judge_decisions != self.round_records[-1].judge_decisions:
+            raise ValueError("final Judge decisions differ from final round")
+        replayed_resolved: set[str] = set()
+        known_findings: set[str] = set()
+        for record in self.round_records:
+            for finding in record.red_findings:
+                known_findings.add(finding.finding_id)
+                replayed_resolved.discard(finding.finding_id)
+            for disposition in record.finding_dispositions:
+                if disposition.disposition is FindingDisposition.RESOLVED:
+                    replayed_resolved.add(disposition.finding_id)
+                else:
+                    replayed_resolved.discard(disposition.finding_id)
+        if known_findings != finding_ids:
+            raise ValueError("round finding lineage differs from cumulative findings")
+        if replayed_resolved != set(self.resolved_finding_ids):
+            raise ValueError("resolved findings differ from Judge dispositions")
+        if self.termination_reason is VerificationTerminationReason.JUDGE_FINALIZED:
+            if self.round_records[-1].judge_action is not JudgeRoundAction.FINALIZE:
+                raise ValueError("JUDGE_FINALIZED requires Judge FINALIZE")
+        elif (
+            self.termination_reason is VerificationTerminationReason.MAX_ROUNDS
+            and self.round_records[-1].judge_action is not JudgeRoundAction.CONTINUE
+        ):
+            raise ValueError("bounded termination requires Judge CONTINUE")
+        if (
+            self.termination_reason
+            in {
+                VerificationTerminationReason.MAX_ROUNDS,
+                VerificationTerminationReason.MAX_FINDINGS,
+            }
+            and self.disposition is VerificationDisposition.VERIFIED
+        ):
+            raise ValueError("bounded termination cannot be VERIFIED")
+        expected_artifact_hash = stable_hash(
+            self.model_dump(mode="json", exclude={"artifact_content_hash"})
+        )
+        if self.artifact_content_hash != expected_artifact_hash:
+            raise ValueError("verification artifact content hash differs")
         return self
 
 

@@ -4,12 +4,42 @@ from __future__ import annotations
 
 from researchos.domain.claims import CitationIntegrityIssue, CitationSeverity
 from researchos.domain.synthesis import (
+    AcquisitionRequest,
     JudgeDecision,
     JudgeVerdict,
     PublicationState,
     RedFinding,
     ReportDraftRevision,
+    StructuralSupport,
+    VerificationDisposition,
 )
+
+
+def _plain_text(value: str) -> str:
+    """Escape model text so only the runtime can create Markdown structure."""
+    escaped = value.replace("\\", "\\\\")
+    for marker in (
+        "`",
+        "*",
+        "_",
+        "^",
+        "{",
+        "}",
+        "[",
+        "]",
+        "(",
+        ")",
+        "#",
+        "+",
+        "-",
+        ".",
+        "!",
+        "|",
+        ">",
+        "<",
+    ):
+        escaped = escaped.replace(marker, f"\\{marker}")
+    return escaped.replace("\n", " ")
 
 
 def is_publishable(
@@ -34,6 +64,9 @@ def render_markdown(
     findings: tuple[RedFinding, ...] = (),
     resolved_finding_ids: tuple[str, ...] = (),
     citation_issues: tuple[CitationIntegrityIssue, ...] = (),
+    disposition: VerificationDisposition = VerificationDisposition.INCONCLUSIVE,
+    acquisition_requests: tuple[AcquisitionRequest, ...] = (),
+    omitted_claim_ids: tuple[str, ...] = (),
 ) -> bytes:
     verdicts = {item.report_claim_id: item.verdict for item in decisions}
     resolved = set(resolved_finding_ids)
@@ -57,7 +90,12 @@ def render_markdown(
         citations_by_claim.setdefault(report_claim.report_claim_id, []).append(
             citation.citation_id
         )
-    lines = ["# Research Report", ""]
+    lines = [
+        "# Research Report",
+        "",
+        f"Verification disposition: `{disposition.value}`",
+        "",
+    ]
     published_report_claim_ids: set[str] = set()
     for section in sorted(
         draft.sections, key=lambda item: (item.ordinal, item.section_id)
@@ -77,14 +115,43 @@ def render_markdown(
         ]
         if not included:
             continue
-        lines.extend([f"## {section.title}", ""])
+        lines.extend([f"## {_plain_text(section.title)}", ""])
         for claim in sorted(included, key=lambda item: item.report_claim_id):
             published_report_claim_ids.add(claim.report_claim_id)
             pins = "".join(
                 f" [^{citation_id}]"
                 for citation_id in citations_by_claim.get(claim.report_claim_id, [])
             )
-            lines.extend([f"{claim.prose}{pins}", ""])
+            lines.extend([f"{_plain_text(claim.prose)}{pins}", ""])
+    conflicts = sorted(
+        item.report_claim_id
+        for item in draft.report_claims
+        if item.structural_support is StructuralSupport.CONFLICTED
+    )
+    if conflicts:
+        lines.extend(["## Disclosed conflicts", ""])
+        lines.extend(f"- `{item}`" for item in conflicts)
+        lines.append("")
+    unresolved = sorted(
+        item.report_claim_id
+        for item in draft.report_claims
+        if item.report_claim_id not in published_report_claim_ids
+    )
+    if omitted_claim_ids or unresolved:
+        lines.extend(["## Omitted or unresolved claims", ""])
+        lines.extend(f"- omitted Claim `{item}`" for item in sorted(omitted_claim_ids))
+        lines.extend(f"- unresolved ReportClaim `{item}`" for item in unresolved)
+        lines.append("")
+    if acquisition_requests:
+        lines.extend(["## Pending evidence acquisition", ""])
+        lines.extend(
+            f"- `{item.acquisition_request_id}` for `{item.report_claim_id}`"
+            for item in sorted(
+                acquisition_requests,
+                key=lambda item: item.acquisition_request_id,
+            )
+        )
+        lines.append("")
     for citation in sorted(draft.citations, key=lambda item: item.citation_id):
         report_claim = next(
             item for item in draft.report_claims if item.claim_id == citation.claim_id

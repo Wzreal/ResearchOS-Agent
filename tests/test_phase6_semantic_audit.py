@@ -35,6 +35,7 @@ from researchos.application.errors import (
     VerificationModelFailure,
     VerificationPersistenceError,
     VerificationPreconditionError,
+    VerificationTraceCommitError,
     VerificationUsageUncertain,
 )
 from researchos.application.verification_coordinator import (
@@ -42,6 +43,7 @@ from researchos.application.verification_coordinator import (
     determine_disposition,
 )
 from researchos.application.verification_input import (
+    _context_bytes,
     compute_verification_id,
     freeze_verification_input,
 )
@@ -70,6 +72,7 @@ from researchos.domain.synthesis import (
     JudgeVerdict,
     PublicationState,
     RedCandidateFinding,
+    RedFinding,
     RedResponse,
     ReportClaim,
     StructuralSupport,
@@ -79,6 +82,7 @@ from researchos.domain.synthesis import (
     VerificationModelRequest,
     VerificationPolicy,
     VerificationRole,
+    VerificationTerminationReason,
 )
 
 LIMITS = RuntimeResourceAmount(
@@ -98,6 +102,15 @@ def _run(service, state, policy, *, prior=None, cancellation=None):
             cancellation=cancellation or NeverCancelled(),
             expected_prior_verification_id=prior,
         )
+    )
+
+
+def _open_finding(report_claim_id: str, finding_id: str = "find_test") -> RedFinding:
+    return RedFinding(
+        finding_id=finding_id,
+        finding_type=FindingType.OVERCLAIM,
+        report_claim_id=report_claim_id,
+        rationale="test finding",
     )
 
 
@@ -236,7 +249,7 @@ class SpyStore:
 
 
 def test_live_stores_load_once_and_roles_use_frozen_snapshots() -> None:
-    state, policy, _, evidence, claims, fixtures = prepared()
+    state, policy, frozen, evidence, claims, fixtures = prepared()
     evidence_spy = SpyStore(evidence)
     claim_spy = SpyStore(claims)
     model = MockVerificationModel(fixtures)
@@ -298,11 +311,36 @@ def test_whole_item_exact_and_one_byte_boundaries() -> None:
     evidence, claims, claim, ingested = phase6_graph()
     claim_snapshot = claims.load(claim.claim.run_id)
     evidence_snapshot = evidence.load(claim.claim.run_id)
-    claim_size = len(canonical_json_bytes(claim_snapshot.claims[0])) + len(
-        canonical_json_bytes(claim_snapshot.claim_revisions[0])
+    claim_payload = {
+        "record": claim_snapshot.claims[0].model_dump(mode="json"),
+        "revision": claim_snapshot.claim_revisions[0].model_dump(mode="json"),
+    }
+    evidence_payload = {
+        "record": evidence_snapshot.evidence[0].model_dump(mode="json"),
+        "revision": evidence_snapshot.revisions[0].model_dump(mode="json"),
+    }
+    full = freeze_verification_input(
+        run_id=claim.claim.run_id,
+        run_revision=1,
+        claim_store=claims,
+        evidence_store=evidence,
+        policy=VerificationPolicy(),
     )
-    evidence_size = len(canonical_json_bytes(evidence_snapshot.evidence[0])) + len(
-        canonical_json_bytes(evidence_snapshot.revisions[0])
+    claim_size = _context_bytes(
+        claims=[claim_payload],
+        evidence=[],
+        citations=[],
+        conflicts=[],
+        omitted_claim_ids=[],
+        omitted_evidence_ids=[ingested.items[0].evidence_id],
+    )
+    full_size = _context_bytes(
+        claims=[claim_payload],
+        evidence=[evidence_payload],
+        citations=list(full.allowed_citations),
+        conflicts=list(full.conflict_candidates),
+        omitted_claim_ids=[],
+        omitted_evidence_ids=[],
     )
     exact_claim = freeze_verification_input(
         run_id=claim.claim.run_id,
@@ -313,20 +351,20 @@ def test_whole_item_exact_and_one_byte_boundaries() -> None:
     )
     assert exact_claim.selected_claim_ids == (claim.claim.claim_id,)
     assert exact_claim.omitted_evidence_ids == (ingested.items[0].evidence_id,)
-    under = freeze_verification_input(
-        run_id=claim.claim.run_id,
-        run_revision=1,
-        claim_store=claims,
-        evidence_store=evidence,
-        policy=VerificationPolicy(max_model_context_bytes=claim_size - 1),
-    )
-    assert under.omitted_claim_ids == (claim.claim.claim_id,)
+    with pytest.raises(VerificationPreconditionError, match="metadata"):
+        freeze_verification_input(
+            run_id=claim.claim.run_id,
+            run_revision=1,
+            claim_store=claims,
+            evidence_store=evidence,
+            policy=VerificationPolicy(max_model_context_bytes=claim_size - 1),
+        )
     exact_evidence = freeze_verification_input(
         run_id=claim.claim.run_id,
         run_revision=1,
         claim_store=claims,
         evidence_store=evidence,
-        policy=VerificationPolicy(max_model_context_bytes=claim_size + evidence_size),
+        policy=VerificationPolicy(max_model_context_bytes=full_size),
     )
     assert exact_evidence.selected_evidence_ids == (ingested.items[0].evidence_id,)
     assert not (
@@ -377,35 +415,14 @@ def test_synthesis_requires_exactly_one_report_claim(mutation) -> None:
 )
 def test_runtime_structural_support_truth_table(relation_set, expected) -> None:
     _, policy, frozen, _, _, _ = prepared()
-    selected = set(frozen.selected_evidence_ids)
-    edge_by_id = {item.edge_id: item for item in frozen.claim_snapshot.edges}
-    revisions = tuple(
-        item
-        for item in frozen.claim_snapshot.edge_revisions
-        if item.relation.value in relation_set
+    base = frozen.current_valid_edges[0]
+    views = tuple(
+        base.model_copy(
+            update={"revision": base.revision.model_copy(update={"relation": relation})}
+        )
+        for relation in relation_set
     )
-    if "contradicts" in relation_set and revisions:
-        support = revisions[0]
-        fake_edge = edge_by_id[support.edge_id].model_copy(
-            update={"edge_id": "edge_contradict", "evidence_id": next(iter(selected))}
-        )
-        revisions = (
-            support,
-            support.model_copy(
-                update={"edge_id": fake_edge.edge_id, "relation": "contradicts"}
-            ),
-        )
-        snapshot = frozen.claim_snapshot.model_copy(
-            update={
-                "edges": (*frozen.claim_snapshot.edges, fake_edge),
-                "edge_revisions": revisions,
-            }
-        )
-    else:
-        snapshot = frozen.claim_snapshot.model_copy(
-            update={"edge_revisions": revisions}
-        )
-    candidate = frozen.model_copy(update={"claim_snapshot": snapshot})
+    candidate = frozen.model_copy(update={"current_valid_edges": views})
     claim_id = frozen.selected_claim_ids[0]
     assert VerificationCoordinator._support(claim_id, candidate) is expected
 
@@ -449,6 +466,7 @@ def test_remove_preserves_identity_and_clears_citations() -> None:
         frozen,
         policy,
     )
+    finding = _open_finding(draft.report_claims[0].report_claim_id, "find_remove")
     revised, _, _ = coordinator._apply_blue(
         verification_id,
         draft,
@@ -457,11 +475,12 @@ def test_remove_preserves_identity_and_clears_citations() -> None:
                 BlueAction(
                     action=BlueActionType.REMOVE,
                     report_claim_id=draft.report_claims[0].report_claim_id,
+                    finding_id=finding.finding_id,
                 ),
             )
         ),
         frozen,
-        (),
+        (finding,),
         1,
     )
     assert (
@@ -495,6 +514,9 @@ def test_keep_round_creates_continuous_deterministic_draft_lineage() -> None:
         findings=result.findings,
         resolved_finding_ids=result.resolved_finding_ids,
         citation_issues=result.citation_issues,
+        disposition=result.disposition,
+        acquisition_requests=result.acquisition_requests,
+        omitted_claim_ids=result.omitted_claim_ids,
     ) == artifacts.report_bytes(state.run_id)
 
 
@@ -700,6 +722,10 @@ def test_blue_contract_and_conflicting_actions_fail_closed() -> None:
         frozen,
         policy,
     )
+    first_finding = _open_finding(draft.report_claims[0].report_claim_id, "find_first")
+    second_finding = _open_finding(
+        draft.report_claims[0].report_claim_id, "find_second"
+    )
     with pytest.raises(VerificationContractError, match="conflicting"):
         coordinator._apply_blue(
             verification_id,
@@ -707,17 +733,20 @@ def test_blue_contract_and_conflicting_actions_fail_closed() -> None:
             BlueResponse(
                 actions=(
                     BlueAction(
-                        action=BlueActionType.KEEP,
+                        action=BlueActionType.QUALIFY,
                         report_claim_id=draft.report_claims[0].report_claim_id,
+                        finding_id=first_finding.finding_id,
+                        qualified_prose="qualified",
                     ),
                     BlueAction(
                         action=BlueActionType.REMOVE,
                         report_claim_id=draft.report_claims[0].report_claim_id,
+                        finding_id=second_finding.finding_id,
                     ),
                 )
             ),
             frozen,
-            (),
+            (first_finding, second_finding),
             1,
         )
 
@@ -762,14 +791,20 @@ def test_blue_action_order_is_deterministic_across_report_claims() -> None:
         (),
         0,
     )
+    first_finding = _open_finding(
+        two_claim_draft.report_claims[0].report_claim_id, "find_first"
+    )
+    second_finding = _open_finding(second.report_claim_id, "find_second")
     actions = (
         BlueAction(
             action=BlueActionType.KEEP,
             report_claim_id=two_claim_draft.report_claims[0].report_claim_id,
+            finding_id=first_finding.finding_id,
         ),
         BlueAction(
             action=BlueActionType.REMOVE,
             report_claim_id=second.report_claim_id,
+            finding_id=second_finding.finding_id,
         ),
     )
     first, _, _ = coordinator._apply_blue(
@@ -777,7 +812,7 @@ def test_blue_action_order_is_deterministic_across_report_claims() -> None:
         two_claim_draft,
         BlueResponse(actions=actions),
         frozen,
-        (),
+        (first_finding, second_finding),
         1,
     )
     second_result, _, _ = coordinator._apply_blue(
@@ -785,14 +820,14 @@ def test_blue_action_order_is_deterministic_across_report_claims() -> None:
         two_claim_draft,
         BlueResponse(actions=tuple(reversed(actions))),
         frozen,
-        (),
+        (first_finding, second_finding),
         1,
     )
     assert first == second_result
 
 
 def test_judge_requires_exact_current_draft_and_structural_support() -> None:
-    state, policy, _, evidence, claims, fixtures = prepared()
+    state, policy, frozen, evidence, claims, fixtures = prepared()
     model = MockVerificationModel(fixtures)
     service, _ = build_service(
         evidence, claims, model, InMemoryVerificationArtifactStore()
@@ -802,9 +837,10 @@ def test_judge_requires_exact_current_draft_and_structural_support() -> None:
     stale = JudgeResponse(
         draft_revision_id=result.draft_revisions[0].draft_revision_id,
         decisions=result.judge_decisions,
+        finding_dispositions=(),
     )
     with pytest.raises(VerificationContractError, match="stale"):
-        coordinator._validate_judge(stale, result.final_draft)
+        coordinator._validate_judge(stale, result.final_draft, (), frozen)
 
 
 @pytest.mark.parametrize(
@@ -1069,8 +1105,9 @@ def test_completion_trace_failure_replays_without_model_call() -> None:
         clock=FrozenClock(NOW),
         trace_sink=CompletionFailTrace(),
     )
-    with pytest.raises(OSError, match="completion trace"):
+    with pytest.raises(VerificationTraceCommitError) as captured:
         _run(service, state, policy)
+    assert captured.value.artifact_committed is True
     replay_model = MockVerificationModel({})
     replay, _ = build_service(evidence, claims, replay_model, artifacts)
     _run(replay, state, policy)
@@ -1147,6 +1184,7 @@ def test_trace_contains_no_model_or_domain_prose() -> None:
             payload={
                 "draft_revision_id": revised.draft_revision_id,
                 "action": "finalize",
+                "finding_dispositions": [],
                 "decisions": [
                     {
                         "report_claim_id": revised.report_claims[0].report_claim_id,
@@ -1230,6 +1268,7 @@ def test_every_blue_action_has_bounded_effect(action_type) -> None:
         kwargs["evidence_id"] = frozen.selected_evidence_ids[0]
     elif action_type is BlueActionType.REQUEST_EVIDENCE:
         kwargs["reason"] = "need more evidence"
+    finding = _open_finding(draft.report_claims[0].report_claim_id)
     revised, acquisitions, _ = coordinator._apply_blue(
         verification_id,
         draft,
@@ -1238,12 +1277,13 @@ def test_every_blue_action_has_bounded_effect(action_type) -> None:
                 BlueAction(
                     action=action_type,
                     report_claim_id=draft.report_claims[0].report_claim_id,
+                    finding_id=finding.finding_id,
                     **kwargs,
                 ),
             )
         ),
         frozen,
-        (),
+        (finding,),
         1,
     )
     assert revised.revision_number == 2
@@ -1281,6 +1321,7 @@ def test_blue_invented_citation_and_judge_content_mutation_are_rejected() -> Non
         frozen,
         policy,
     )
+    finding = _open_finding(draft.report_claims[0].report_claim_id)
     with pytest.raises(VerificationContractError):
         coordinator._apply_blue(
             verification_id,
@@ -1290,12 +1331,13 @@ def test_blue_invented_citation_and_judge_content_mutation_are_rejected() -> Non
                     BlueAction(
                         action=BlueActionType.ADD_EXISTING_CITATION,
                         report_claim_id=draft.report_claims[0].report_claim_id,
+                        finding_id=finding.finding_id,
                         evidence_id="ev_invented",
                     ),
                 )
             ),
             frozen,
-            (),
+            (finding,),
             1,
         )
     for forbidden in ("prose", "evidence_id", "blue_action"):
@@ -1304,6 +1346,7 @@ def test_blue_invented_citation_and_judge_content_mutation_are_rejected() -> Non
                 {
                     "draft_revision_id": draft.draft_revision_id,
                     "decisions": [],
+                    "finding_dispositions": [],
                     forbidden: "invented",
                 }
             )
@@ -1334,8 +1377,17 @@ def _continued_case(*, max_rounds=2, finalize_second=True, duplicate=True):
         initial,
         frozen,
     )[0]
+    blue_one = BlueResponse(
+        actions=(
+            BlueAction(
+                action=BlueActionType.KEEP,
+                report_claim_id=finding.report_claim_id,
+                finding_id=finding.finding_id,
+            ),
+        )
+    )
     draft_one, _, _ = coordinator._apply_blue(
-        verification_id, initial, BlueResponse(), frozen, (finding,), 1
+        verification_id, initial, blue_one, frozen, (finding,), 1
     )
     fixtures = {
         synthesis_key: base[synthesis_key],
@@ -1346,7 +1398,7 @@ def _continued_case(*, max_rounds=2, finalize_second=True, duplicate=True):
         ),
         VerificationFixtureKey(
             verification_id, VerificationRole.BLUE, 1, initial.draft_revision_id
-        ): VerificationFixture(payload={"actions": []}),
+        ): VerificationFixture(payload=blue_one.model_dump(mode="json")),
         VerificationFixtureKey(
             verification_id, VerificationRole.JUDGE, 1, draft_one.draft_revision_id
         ): VerificationFixture(
@@ -1354,6 +1406,12 @@ def _continued_case(*, max_rounds=2, finalize_second=True, duplicate=True):
                 "draft_revision_id": draft_one.draft_revision_id,
                 "action": "continue",
                 "continue_reason": "open_findings",
+                "finding_dispositions": [
+                    {
+                        "finding_id": finding.finding_id,
+                        "disposition": "unresolved",
+                    }
+                ],
                 "decisions": [
                     {
                         "report_claim_id": draft_one.report_claims[0].report_claim_id,
@@ -1412,6 +1470,14 @@ def _continued_case(*, max_rounds=2, finalize_second=True, duplicate=True):
                         "continue_reason": (
                             None if finalize_second else "open_findings"
                         ),
+                        "finding_dispositions": [
+                            {
+                                "finding_id": finding.finding_id,
+                                "disposition": (
+                                    "resolved" if finalize_second else "unresolved"
+                                ),
+                            }
+                        ],
                         "decisions": [
                             {
                                 "report_claim_id": draft_two.report_claims[
@@ -1448,6 +1514,7 @@ def test_max_round_exhaustion_is_inconclusive() -> None:
     result = _run(service, state, policy)
     assert len(model.requests) == 4
     assert result.disposition is VerificationDisposition.INCONCLUSIVE
+    assert result.termination_reason is VerificationTerminationReason.MAX_ROUNDS
 
 
 def test_pending_acquisition_alone_cannot_justify_continue() -> None:
@@ -1472,6 +1539,7 @@ def test_pending_acquisition_alone_cannot_justify_continue() -> None:
         frozen,
         policy,
     )
+    finding = _open_finding(draft.report_claims[0].report_claim_id)
     revised, acquisitions, resolved = coordinator._apply_blue(
         verification_id,
         draft,
@@ -1480,12 +1548,13 @@ def test_pending_acquisition_alone_cannot_justify_continue() -> None:
                 BlueAction(
                     action=BlueActionType.REQUEST_EVIDENCE,
                     report_claim_id=draft.report_claims[0].report_claim_id,
+                    finding_id=finding.finding_id,
                     reason="need evidence",
                 ),
             )
         ),
         frozen,
-        (),
+        (finding,),
         1,
     )
     assert acquisitions and not resolved
@@ -1499,8 +1568,14 @@ def test_pending_acquisition_alone_cannot_justify_continue() -> None:
                 verdict=JudgeVerdict.UNRESOLVED,
             ),
         ),
+        finding_dispositions=(
+            {
+                "finding_id": finding.finding_id,
+                "disposition": "resolved",
+            },
+        ),
     )
-    coordinator._validate_judge(judge, revised)
+    coordinator._validate_judge(judge, revised, (finding,), frozen)
     with pytest.raises(VerificationContractError, match="CONTINUE"):
         coordinator._validate_continue(judge, revised, (), ())
 
@@ -1540,6 +1615,30 @@ def test_max_finding_exhaustion_is_bounded_and_not_verified() -> None:
             ]
         }
     )
+    accepted = coordinator._validate_findings(
+        synthesis_key.verification_id,
+        RedResponse.model_validate(fixtures[red_key].payload),
+        initial,
+        frozen,
+    )[0]
+    blue_key = next(key for key in fixtures if key.role is VerificationRole.BLUE)
+    fixtures[blue_key] = VerificationFixture(
+        payload=BlueResponse(
+            actions=(
+                BlueAction(
+                    action=BlueActionType.KEEP,
+                    report_claim_id=report_claim_id,
+                    finding_id=accepted.finding_id,
+                ),
+            )
+        ).model_dump(mode="json")
+    )
+    judge_key = next(key for key in fixtures if key.role is VerificationRole.JUDGE)
+    judge_payload = dict(fixtures[judge_key].payload)
+    judge_payload["finding_dispositions"] = [
+        {"finding_id": accepted.finding_id, "disposition": "resolved"}
+    ]
+    fixtures[judge_key] = VerificationFixture(payload=judge_payload)
     assert draft_id == initial.draft_revision_id
     service, _ = build_service(
         evidence,
@@ -1549,7 +1648,8 @@ def test_max_finding_exhaustion_is_bounded_and_not_verified() -> None:
     )
     result = _run(service, state, policy)
     assert len(result.findings) == 1
-    assert result.disposition is VerificationDisposition.INCONCLUSIVE
+    assert result.disposition is VerificationDisposition.PARTIALLY_VERIFIED
+    assert result.termination_reason is VerificationTerminationReason.MAX_FINDINGS
 
 
 @pytest.mark.parametrize(

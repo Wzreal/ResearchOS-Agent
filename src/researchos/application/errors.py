@@ -258,12 +258,36 @@ class VerificationInputChanged(ResearchOSError):
     pass
 
 
+class VerificationInputCorruption(ResearchOSError):
+    """Frozen Claim/Evidence snapshots disagree structurally."""
+
+
 class VerificationUsageUncertain(ResearchOSError):
     pass
 
 
 class VerificationPersistenceError(ResearchOSError):
-    def __init__(self, message: str, *, run_id: str, artifact_replaced: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str,
+        authority_committed: bool,
+        report_committed: bool,
+        artifact_committed: bool,
+    ) -> None:
         super().__init__(message)
         self.run_id = run_id
-        self.artifact_replaced = artifact_replaced
+        self.authority_committed = authority_committed
+        self.report_committed = report_committed
+        self.artifact_committed = artifact_committed
+        # Compatibility name: the authoritative JSON is the Phase 6 artifact.
+        self.artifact_replaced = authority_committed
+
+
+class VerificationTraceCommitError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, verification_id: str) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.verification_id = verification_id
+        self.artifact_committed = True

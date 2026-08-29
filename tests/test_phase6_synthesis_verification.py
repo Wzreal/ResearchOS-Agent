@@ -35,6 +35,7 @@ from researchos.application.errors import (
 )
 from researchos.application.verification_coordinator import VerificationCoordinator
 from researchos.application.verification_input import (
+    _context_bytes,
     compute_verification_id,
     freeze_verification_input,
 )
@@ -148,6 +149,7 @@ def prepared(policy: VerificationPolicy | None = None):
             payload={
                 "draft_revision_id": revised.draft_revision_id,
                 "action": "finalize",
+                "finding_dispositions": [],
                 "decisions": [
                     {
                         "report_claim_id": revised.report_claims[0].report_claim_id,
@@ -274,8 +276,16 @@ def test_red_finding_pin_invariants() -> None:
 
 
 def test_whole_item_admission_omits_claim_without_truncating() -> None:
-    evidence_store, claim_store, claim, _ = phase6_graph()
-    policy = VerificationPolicy(max_rounds=1, max_model_context_bytes=1)
+    evidence_store, claim_store, claim, ingested = phase6_graph()
+    omitted_size = _context_bytes(
+        claims=[],
+        evidence=[],
+        citations=[],
+        conflicts=[],
+        omitted_claim_ids=[claim.claim.claim_id],
+        omitted_evidence_ids=[ingested.items[0].evidence_id],
+    )
+    policy = VerificationPolicy(max_rounds=1, max_model_context_bytes=omitted_size)
     frozen = freeze_verification_input(
         run_id=context().run_id,
         run_revision=context().run_revision,
@@ -461,9 +471,12 @@ def test_model_cannot_mark_unsupported_claim_supported() -> None:
                         report_claim_id=draft.report_claims[0].report_claim_id,
                         verdict=JudgeVerdict.SUPPORTED,
                     ),
-                )
+                ),
+                finding_dispositions=(),
             ),
             draft=draft,
+            findings=(),
+            frozen=frozen,
         )
 
 
@@ -493,6 +506,12 @@ def test_remove_preserves_report_claim_entity() -> None:
         frozen,
         policy,
     )
+    finding = RedFinding(
+        finding_id="find_remove",
+        finding_type=FindingType.OVERCLAIM,
+        report_claim_id=draft.report_claims[0].report_claim_id,
+        rationale="remove finding",
+    )
     revised, _, _ = coordinator._apply_blue(
         verification_id,
         draft,
@@ -501,11 +520,12 @@ def test_remove_preserves_report_claim_entity() -> None:
                 BlueAction(
                     action=BlueActionType.REMOVE,
                     report_claim_id=draft.report_claims[0].report_claim_id,
+                    finding_id=finding.finding_id,
                 ),
             )
         ),
         frozen,
-        (),
+        (finding,),
         1,
     )
     assert revised.report_claims[0].report_claim_id == (

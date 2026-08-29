@@ -646,6 +646,45 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   usage plus certainty. Phase 3 remains the sole owner of durable execution,
   retry, checkpoints, and budget settlement; durable lifecycle integration is
   deferred.
+
+  Phase 6 has exactly one current-valid edge derivation. It admits an ACTIVE
+  edge only when its current edge revision exists, both referenced entities are
+  ACTIVE, and the edge revision pins both entities' current revisions. A stale
+  pin is ignored rather than upgraded; a dangling entity or revision is typed
+  input corruption. Evidence selection, citation allowlists and assignments,
+  structural support, conflicts, and relation lookup all consume that same
+  derived set. Evidence ordering is CONTRADICTS, SUPPORTS, CONTEXTUALIZES, then
+  edge ID and Evidence ID.
+
+  Blue acts exactly once on each open finding and cannot resolve it. Multiple
+  findings may address one Claim; only incompatible mutations conflict. Judge
+  decides every ReportClaim and dispositions every open finding exactly once.
+  Re-emitting a stable finding ID reopens it for the current round; the ID is
+  permanent identity and cumulative quota deduplication, not permanent
+  resolution. UNKNOWN Judge usage with FINALIZE remains publishable as UNKNOWN,
+  while UNKNOWN with CONTINUE stops before another model call. All invocation
+  usage, certainty, expected mode, and trace callback state is local, making a
+  coordinator reentrant across concurrent runs.
+
+  A `CitationAssignment` binds each final citation to a current-valid edge and
+  relation. SUPPORTED and publishable QUALIFIED Claims require a SUPPORTS
+  assignment. A conflicted Claim published QUALIFIED must also disclose a
+  CONTRADICTS assignment; CONTEXTUALIZES alone is never support. Draft revision
+  identity additionally binds the parent revision ID. Model prose and titles
+  are escaped as plain text; only the deterministic renderer owns Markdown
+  structure and citation footnote syntax.
+
+  The authoritative result stores both store revisions, all selected/omitted
+  IDs, complete draft lineage, validated Red/Blue/Judge round records, finding
+  dispositions, acquisition requests, citation issues/assignments, termination
+  reason, usage certainty, Markdown hash, and supersession identity. A
+  canonical content hash excluding itself detects silent authority tampering.
+  Same-ID publication compares the entire canonical result before writing the
+  derived report. Persistence failures expose `authority_committed`,
+  `report_committed`, and `artifact_committed`; completion-trace failure after
+  publication is separately typed with `artifact_committed=True`. Expected
+  prior authority absence fails before model calls. This remains atomic
+  snapshot publication and reconciliation, not a WAL or checkpoint system.
 - **Consequences:** Offline exact fixtures can reproduce a complete
   synthesis/verification result, replay avoids provider calls, and publication
   has one clear authority. New evidence acquisition is represented as a

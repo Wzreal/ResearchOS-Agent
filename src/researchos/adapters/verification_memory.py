@@ -26,6 +26,9 @@ class InMemoryVerificationArtifactStore:
             findings=result.findings,
             resolved_finding_ids=result.resolved_finding_ids,
             citation_issues=result.citation_issues,
+            disposition=result.disposition,
+            acquisition_requests=result.acquisition_requests,
+            omitted_claim_ids=result.omitted_claim_ids,
         )
         if hashlib.sha256(expected).hexdigest() != result.markdown_sha256:
             raise VerificationArtifactConflict("authoritative Markdown hash differs")
@@ -43,6 +46,10 @@ class InMemoryVerificationArtifactStore:
             raise VerificationArtifactConflict("Markdown hash differs")
         current = self._results.get(result.run_id)
         if current is not None and current.verification_id == result.verification_id:
+            if current != result:
+                raise VerificationArtifactConflict(
+                    "same verification identity has different canonical artifact"
+                )
             self._reports[result.run_id] = markdown
             return
         if (
@@ -62,6 +69,9 @@ class InMemoryVerificationArtifactStore:
             findings=result.findings,
             resolved_finding_ids=result.resolved_finding_ids,
             citation_issues=result.citation_issues,
+            disposition=result.disposition,
+            acquisition_requests=result.acquisition_requests,
+            omitted_claim_ids=result.omitted_claim_ids,
         )
         changed = self._reports.get(run_id) != expected
         self._reports[run_id] = expected

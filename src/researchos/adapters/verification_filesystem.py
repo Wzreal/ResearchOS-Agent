@@ -52,6 +52,9 @@ class FilesystemVerificationArtifactStore:
             findings=result.findings,
             resolved_finding_ids=result.resolved_finding_ids,
             citation_issues=result.citation_issues,
+            disposition=result.disposition,
+            acquisition_requests=result.acquisition_requests,
+            omitted_claim_ids=result.omitted_claim_ids,
         )
         if hashlib.sha256(expected_markdown).hexdigest() != result.markdown_sha256:
             raise VerificationArtifactConflict("authoritative Markdown hash differs")
@@ -70,6 +73,10 @@ class FilesystemVerificationArtifactStore:
         authority, report = self._paths(result.run_id)
         current = self.load(result.run_id)
         if current is not None and current.verification_id == result.verification_id:
+            if current != result:
+                raise VerificationArtifactConflict(
+                    "same verification identity has different canonical artifact"
+                )
             self._write_report(result.run_id, report, markdown)
             return
         if (
@@ -86,7 +93,9 @@ class FilesystemVerificationArtifactStore:
             raise VerificationPersistenceError(
                 "authoritative artifact write failed",
                 run_id=result.run_id,
-                artifact_replaced=exc.replaced,
+                authority_committed=exc.replaced,
+                report_committed=False,
+                artifact_committed=exc.replaced,
             ) from exc
         self._write_report(result.run_id, report, markdown)
 
@@ -101,7 +110,9 @@ class FilesystemVerificationArtifactStore:
             raise VerificationPersistenceError(
                 "derived report write failed",
                 run_id=run_id,
-                artifact_replaced=exc.replaced,
+                authority_committed=True,
+                report_committed=exc.replaced,
+                artifact_committed=True,
             ) from exc
 
     def reconcile_report(self, run_id: str) -> bool:
@@ -115,6 +126,9 @@ class FilesystemVerificationArtifactStore:
             findings=result.findings,
             resolved_finding_ids=result.resolved_finding_ids,
             citation_issues=result.citation_issues,
+            disposition=result.disposition,
+            acquisition_requests=result.acquisition_requests,
+            omitted_claim_ids=result.omitted_claim_ids,
         )
         if report.exists() and report.read_bytes() == expected:
             return False

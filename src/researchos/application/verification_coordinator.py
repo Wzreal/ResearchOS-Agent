@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, TypeVar
 
@@ -29,13 +30,14 @@ from researchos.domain.contracts import (
     TraceEventType,
     canonical_json_bytes,
 )
-from researchos.domain.evidence import RecordLifecycle
 from researchos.domain.identity import stable_hash, stable_id
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 from researchos.domain.synthesis import (
     AcquisitionRequest,
     BlueActionType,
     BlueResponse,
+    FindingDisposition,
+    FindingDispositionDecision,
     FrozenVerificationInput,
     JudgeContinueReason,
     JudgeDecision,
@@ -54,6 +56,8 @@ from researchos.domain.synthesis import (
     VerificationModelRequest,
     VerificationPolicy,
     VerificationRole,
+    VerificationRoundRecord,
+    VerificationTerminationReason,
 )
 from researchos.interfaces.lifecycle import Clock
 from researchos.interfaces.runtime import CancellationSignal
@@ -62,16 +66,18 @@ from researchos.interfaces.verification import VerificationModel
 T = TypeVar("T", bound=BaseModel)
 
 
+@dataclass
+class VerificationExecutionAccumulator:
+    usage: RuntimeResourceAmount = field(default_factory=RuntimeResourceAmount)
+    certainty: UsageCertainty = UsageCertainty.EXACT
+    expected_mode: OperatingMode = OperatingMode.MOCK
+    event_callback: Callable[[TraceEventType, dict[str, object]], None] | None = None
+
+
 class VerificationCoordinator:
     def __init__(self, *, model: VerificationModel, clock: Clock) -> None:
         self._model = model
         self._clock = clock
-        self._usage = RuntimeResourceAmount()
-        self._certainty = UsageCertainty.EXACT
-        self._expected_mode = OperatingMode.MOCK
-        self._event_callback: (
-            Callable[[TraceEventType, dict[str, object]], None] | None
-        ) = None
 
     @property
     def model_bundle_hash(self) -> str:
@@ -99,13 +105,18 @@ class VerificationCoordinator:
         RuntimeResourceAmount,
         UsageCertainty,
         bool,
+        tuple[VerificationRoundRecord, ...],
+        VerificationTerminationReason,
     ]:
-        self._usage = RuntimeResourceAmount()
-        self._certainty = UsageCertainty.EXACT
-        self._expected_mode = expected_mode
-        self._event_callback = event_callback
+        accumulator = VerificationExecutionAccumulator(
+            expected_mode=expected_mode, event_callback=event_callback
+        )
         synthesis_id = stable_id("syn", [verification_id, "initial"])
-        self._notify(TraceEventType.SYNTHESIS_STARTED, {"synthesis_id": synthesis_id})
+        self._notify(
+            accumulator,
+            TraceEventType.SYNTHESIS_STARTED,
+            {"synthesis_id": synthesis_id},
+        )
         candidate = await self._call(
             SynthesisCandidate,
             VerificationModelRequest(
@@ -119,10 +130,12 @@ class VerificationCoordinator:
             hard_limits,
             deadline,
             cancellation,
+            accumulator=accumulator,
         )
         draft = self._initial_draft(synthesis_id, candidate, frozen, policy)
         draft_revisions = [draft]
         self._notify(
+            accumulator,
             TraceEventType.SYNTHESIS_VALIDATED,
             {
                 "synthesis_id": synthesis_id,
@@ -133,7 +146,10 @@ class VerificationCoordinator:
         findings_by_id: dict[str, RedFinding] = {}
         acquisitions: dict[str, AcquisitionRequest] = {}
         resolved_finding_ids: set[str] = set()
+        open_findings: dict[str, RedFinding] = {}
+        round_records: list[VerificationRoundRecord] = []
         bounds_exhausted = False
+        termination_reason = VerificationTerminationReason.MAX_ROUNDS
         decisions: tuple[JudgeDecision, ...] = ()
         for round_number in range(1, policy.max_rounds + 1):
             red = await self._call(
@@ -145,21 +161,33 @@ class VerificationCoordinator:
                 hard_limits,
                 deadline,
                 cancellation,
+                accumulator=accumulator,
             )
             current_findings = self._validate_findings(
                 verification_id, red, draft, frozen
             )
             self._notify(
+                accumulator,
                 TraceEventType.VERIFICATION_RED_COMPLETED,
                 {"round": round_number, "finding_count": len(current_findings)},
             )
+            accepted: list[RedFinding] = []
             for finding in current_findings:
-                findings_by_id.setdefault(finding.finding_id, finding)
-            if len(findings_by_id) > policy.max_findings:
+                if (
+                    finding.finding_id in findings_by_id
+                    or len(findings_by_id) < policy.max_findings
+                ):
+                    findings_by_id.setdefault(finding.finding_id, finding)
+                    open_findings[finding.finding_id] = finding
+                    resolved_finding_ids.discard(finding.finding_id)
+                    accepted.append(finding)
+                else:
+                    bounds_exhausted = True
+            if len(current_findings) != len(accepted):
                 bounds_exhausted = True
-                findings_by_id = dict(
-                    sorted(findings_by_id.items())[: policy.max_findings]
-                )
+            round_open = tuple(
+                sorted(open_findings.values(), key=lambda item: item.finding_id)
+            )
             blue = await self._call(
                 BlueResponse,
                 self._request(
@@ -168,27 +196,31 @@ class VerificationCoordinator:
                     round_number,
                     draft,
                     frozen,
-                    findings=tuple(findings_by_id.values()),
+                    findings=round_open,
                 ),
                 policy,
                 hard_limits,
                 deadline,
                 cancellation,
+                accumulator=accumulator,
             )
             self._notify(
+                accumulator,
                 TraceEventType.VERIFICATION_BLUE_COMPLETED,
                 {"round": round_number, "action_count": len(blue.actions)},
             )
-            draft, new_acquisitions, newly_resolved = self._apply_blue(
+            input_draft_id = draft.draft_revision_id
+            draft, new_acquisitions, _blue_resolutions = self._apply_blue(
                 verification_id,
                 draft,
                 blue,
                 frozen,
-                tuple(findings_by_id.values()),
+                round_open,
                 round_number,
             )
             draft_revisions.append(draft)
             self._notify(
+                accumulator,
                 TraceEventType.VERIFICATION_DRAFT_REVISED,
                 {
                     "round": round_number,
@@ -197,7 +229,6 @@ class VerificationCoordinator:
             )
             for item in new_acquisitions:
                 acquisitions.setdefault(item.acquisition_request_id, item)
-            resolved_finding_ids.update(newly_resolved)
             judge = await self._call(
                 JudgeResponse,
                 self._request(
@@ -206,15 +237,48 @@ class VerificationCoordinator:
                     round_number,
                     draft,
                     frozen,
-                    findings=tuple(findings_by_id.values()),
+                    findings=round_open,
                 ),
                 policy,
                 hard_limits,
                 deadline,
                 cancellation,
+                accumulator=accumulator,
             )
-            decisions = self._validate_judge(judge, draft)
+            decisions, dispositions = self._validate_judge(
+                judge, draft, round_open, frozen
+            )
+            for disposition in dispositions:
+                if disposition.disposition is FindingDisposition.RESOLVED:
+                    resolved_finding_ids.add(disposition.finding_id)
+                    open_findings.pop(disposition.finding_id, None)
+                else:
+                    resolved_finding_ids.discard(disposition.finding_id)
+            round_records.append(
+                VerificationRoundRecord(
+                    round_number=round_number,
+                    input_draft_revision_id=input_draft_id,
+                    red_findings=tuple(accepted),
+                    open_findings=round_open,
+                    blue_actions=tuple(
+                        sorted(
+                            blue.actions,
+                            key=lambda item: (
+                                item.report_claim_id,
+                                item.finding_id,
+                                item.action.value,
+                            ),
+                        )
+                    ),
+                    output_draft_revision_id=draft.draft_revision_id,
+                    judge_decisions=decisions,
+                    finding_dispositions=dispositions,
+                    judge_action=judge.action,
+                    continue_reason=judge.continue_reason,
+                )
+            )
             self._notify(
+                accumulator,
                 TraceEventType.VERIFICATION_JUDGE_COMPLETED,
                 {
                     "round": round_number,
@@ -224,19 +288,33 @@ class VerificationCoordinator:
                 },
             )
             self._notify(
+                accumulator,
                 TraceEventType.VERIFICATION_ROUND_COMPLETED,
                 {"round": round_number, "draft_revision_id": draft.draft_revision_id},
             )
             if judge.action is JudgeRoundAction.FINALIZE:
+                termination_reason = (
+                    VerificationTerminationReason.MAX_FINDINGS
+                    if bounds_exhausted
+                    else VerificationTerminationReason.JUDGE_FINALIZED
+                )
                 break
             self._validate_continue(
                 judge,
                 draft,
-                tuple(findings_by_id.values()),
+                round_open,
                 tuple(resolved_finding_ids),
             )
+            if accumulator.certainty is UsageCertainty.UNKNOWN:
+                raise VerificationUsageUncertain(
+                    "unknown Judge usage forbids another verification model call"
+                )
+            if bounds_exhausted:
+                termination_reason = VerificationTerminationReason.MAX_FINDINGS
+                break
             if round_number == policy.max_rounds:
                 bounds_exhausted = True
+                termination_reason = VerificationTerminationReason.MAX_ROUNDS
         return (
             draft,
             tuple(draft_revisions),
@@ -248,9 +326,11 @@ class VerificationCoordinator:
                 )
             ),
             decisions,
-            self._usage,
-            self._certainty,
+            accumulator.usage,
+            accumulator.certainty,
             bounds_exhausted,
+            tuple(round_records),
+            termination_reason,
         )
 
     async def _call(
@@ -261,7 +341,10 @@ class VerificationCoordinator:
         hard_limits: RuntimeResourceAmount,
         deadline: datetime | None,
         cancellation: CancellationSignal,
+        *,
+        accumulator: VerificationExecutionAccumulator | None = None,
     ) -> T:
+        accumulator = accumulator or VerificationExecutionAccumulator()
         encoded_request = canonical_json_bytes(request)
         if len(encoded_request) > policy.max_model_context_bytes:
             raise VerificationContractError("model request exceeds context byte limit")
@@ -296,7 +379,7 @@ class VerificationCoordinator:
             raise VerificationModelFailure("verification provider failed") from exc
         if len(response.raw_bytes) > policy.max_model_response_bytes:
             raise VerificationContractError("model response exceeds byte limit")
-        if response.mode != self._expected_mode.value:
+        if response.mode != accumulator.expected_mode.value:
             raise VerificationContractError("verification model mode mismatch")
         if (
             response.role is not request.role
@@ -304,15 +387,15 @@ class VerificationCoordinator:
             or response.draft_revision_id != request.draft_revision_id
         ):
             raise VerificationContractError("verification response identity mismatch")
-        self._usage = self._usage.plus(response.usage)
+        accumulator.usage = accumulator.usage.plus(response.usage)
         if response.usage_certainty is UsageCertainty.UNKNOWN:
-            self._certainty = UsageCertainty.UNKNOWN
+            accumulator.certainty = UsageCertainty.UNKNOWN
         elif (
             response.usage_certainty is UsageCertainty.UPPER_BOUND
-            and self._certainty is UsageCertainty.EXACT
+            and accumulator.certainty is UsageCertainty.EXACT
         ):
-            self._certainty = UsageCertainty.UPPER_BOUND
-        if not self._usage.fits_within(hard_limits):
+            accumulator.certainty = UsageCertainty.UPPER_BOUND
+        if not accumulator.usage.fits_within(hard_limits):
             raise VerificationContractError("verification hard limits exceeded")
         if (
             response.usage_certainty is UsageCertainty.UNKNOWN
@@ -329,11 +412,14 @@ class VerificationCoordinator:
                 "verification model response is malformed"
             ) from exc
 
+    @staticmethod
     def _notify(
-        self, event_type: TraceEventType, attributes: dict[str, object]
+        accumulator: VerificationExecutionAccumulator,
+        event_type: TraceEventType,
+        attributes: dict[str, object],
     ) -> None:
-        if self._event_callback is not None:
-            self._event_callback(event_type, attributes)
+        if accumulator.event_callback is not None:
+            accumulator.event_callback(event_type, attributes)
 
     @staticmethod
     def _base_context(frozen: FrozenVerificationInput) -> dict[str, Any]:
@@ -352,15 +438,21 @@ class VerificationCoordinator:
         return {
             "frozen_input_hash": frozen.frozen_input_hash,
             "claims": [
-                claim_revisions[
-                    (claim_id, claim_records[claim_id].current_revision)
-                ].model_dump(mode="json")
+                {
+                    "record": claim_records[claim_id].model_dump(mode="json"),
+                    "revision": claim_revisions[
+                        (claim_id, claim_records[claim_id].current_revision)
+                    ].model_dump(mode="json"),
+                }
                 for claim_id in frozen.selected_claim_ids
             ],
             "evidence": [
-                evidence_revisions[
-                    (evidence_id, evidence_records[evidence_id].current_revision)
-                ].model_dump(mode="json")
+                {
+                    "record": evidence_records[evidence_id].model_dump(mode="json"),
+                    "revision": evidence_revisions[
+                        (evidence_id, evidence_records[evidence_id].current_revision)
+                    ].model_dump(mode="json"),
+                }
                 for evidence_id in frozen.selected_evidence_ids
             ],
             "citation_allowlist": [
@@ -397,19 +489,12 @@ class VerificationCoordinator:
 
     @staticmethod
     def _support(claim_id: str, frozen: FrozenVerificationInput) -> StructuralSupport:
-        relations = set()
-        selected = set(frozen.selected_evidence_ids)
-        edge_by_id = {item.edge_id: item for item in frozen.claim_snapshot.edges}
-        for revision in frozen.claim_snapshot.edge_revisions:
-            edge = edge_by_id[revision.edge_id]
-            if (
-                edge.current_revision != revision.revision
-                or edge.lifecycle is not RecordLifecycle.ACTIVE
-                or edge.claim_id != claim_id
-                or edge.evidence_id not in selected
-            ):
-                continue
-            relations.add(revision.relation)
+        relations = {
+            item.revision.relation
+            for item in frozen.current_valid_edges
+            if item.edge.claim_id == claim_id
+            and item.edge.evidence_id in frozen.selected_evidence_ids
+        }
         if (
             ClaimEvidenceRelation.SUPPORTS in relations
             and ClaimEvidenceRelation.CONTRADICTS not in relations
@@ -538,7 +623,9 @@ class VerificationCoordinator:
         }
         digest = stable_hash(content)
         return ReportDraftRevision(
-            draft_revision_id=stable_id("draft", [synthesis_id, revision, digest]),
+            draft_revision_id=stable_id(
+                "draft", [synthesis_id, revision, parent, digest]
+            ),
             synthesis_id=synthesis_id,
             revision_number=revision,
             parent_revision_id=parent,
@@ -609,25 +696,59 @@ class VerificationCoordinator:
         round_number: int,
     ) -> tuple[ReportDraftRevision, tuple[AcquisitionRequest, ...], tuple[str, ...]]:
         claims = {item.report_claim_id: item for item in draft.report_claims}
-        finding_ids = {item.finding_id for item in findings}
+        findings_by_id = {item.finding_id: item for item in findings}
         allowed = {
             (item.claim_id, item.evidence_id): item for item in frozen.allowed_citations
         }
         citations = list(draft.citations)
         acquisitions: list[AcquisitionRequest] = []
-        resolved: set[str] = set()
-        action_claim_ids = [item.report_claim_id for item in response.actions]
-        if len(action_claim_ids) != len(set(action_claim_ids)):
-            raise VerificationContractError("conflicting Blue actions for report claim")
+        action_finding_ids = [item.finding_id for item in response.actions]
+        if set(action_finding_ids) != set(findings_by_id) or len(
+            action_finding_ids
+        ) != len(set(action_finding_ids)):
+            raise VerificationContractError(
+                "Blue must act on every open finding exactly once"
+            )
+        by_claim: dict[str, list] = {}
+        for action in response.actions:
+            by_claim.setdefault(action.report_claim_id, []).append(action)
+        for claim_actions in by_claim.values():
+            mutations = {
+                item.action
+                for item in claim_actions
+                if item.action
+                in {
+                    BlueActionType.QUALIFY,
+                    BlueActionType.REMOVE,
+                    BlueActionType.ADD_EXISTING_CITATION,
+                }
+            }
+            qualified = {
+                item.qualified_prose
+                for item in claim_actions
+                if item.action is BlueActionType.QUALIFY
+            }
+            if len(qualified) > 1 or (
+                BlueActionType.REMOVE in mutations and len(mutations) > 1
+            ):
+                raise VerificationContractError("conflicting Blue mutations")
         for action in sorted(
-            response.actions, key=lambda item: (item.report_claim_id, item.action.value)
+            response.actions,
+            key=lambda item: (
+                item.report_claim_id,
+                item.finding_id,
+                item.action.value,
+            ),
         ):
             claim = claims.get(action.report_claim_id)
-            if claim is None or (
-                action.finding_id is not None and action.finding_id not in finding_ids
-            ):
+            finding = findings_by_id.get(action.finding_id)
+            if claim is None or finding is None:
                 raise VerificationContractError(
                     "Blue action references unknown frozen identity"
+                )
+            if finding.report_claim_id != action.report_claim_id:
+                raise VerificationContractError(
+                    "Blue action report claim differs from its finding"
                 )
             if action.action is BlueActionType.QUALIFY:
                 claims[action.report_claim_id] = claim.model_copy(
@@ -678,11 +799,6 @@ class VerificationCoordinator:
                         reason=action.reason,
                     )
                 )
-            if (
-                action.finding_id is not None
-                and action.action is not BlueActionType.REQUEST_EVIDENCE
-            ):
-                resolved.add(action.finding_id)
         revised = self._make_draft(
             draft.synthesis_id,
             draft.revision_number + 1,
@@ -692,12 +808,16 @@ class VerificationCoordinator:
             tuple(citations),
             round_number,
         )
-        return revised, tuple(acquisitions), tuple(sorted(resolved))
+        # Kept as a compatibility tuple slot; Blue never owns disposition.
+        return revised, tuple(acquisitions), ()
 
     @staticmethod
     def _validate_judge(
-        response: JudgeResponse, draft: ReportDraftRevision
-    ) -> tuple[JudgeDecision, ...]:
+        response: JudgeResponse,
+        draft: ReportDraftRevision,
+        findings: tuple[RedFinding, ...],
+        frozen: FrozenVerificationInput,
+    ) -> tuple[tuple[JudgeDecision, ...], tuple[FindingDispositionDecision, ...]]:
         claims = {item.report_claim_id: item for item in draft.report_claims}
         if response.draft_revision_id != draft.draft_revision_id:
             raise VerificationContractError("Judge draft revision pin is stale")
@@ -706,16 +826,70 @@ class VerificationCoordinator:
             raise VerificationContractError(
                 "Judge must decide each report claim exactly once"
             )
+        disposition_ids = [item.finding_id for item in response.finding_dispositions]
+        finding_ids = {item.finding_id for item in findings}
+        if set(disposition_ids) != finding_ids or len(disposition_ids) != len(
+            set(disposition_ids)
+        ):
+            raise VerificationContractError(
+                "Judge must disposition every open finding exactly once"
+            )
+        assignments = {
+            (item.edge.claim_id, item.edge.evidence_id): item
+            for item in frozen.current_valid_edges
+        }
+        citations_by_report: dict[str, set[ClaimEvidenceRelation]] = {}
+        for citation in draft.citations:
+            report_claim = next(
+                item
+                for item in draft.report_claims
+                if item.claim_id == citation.claim_id
+            )
+            assignment = assignments.get((citation.claim_id, citation.evidence_id))
+            if assignment is None or (
+                assignment.revision.claim_revision != citation.claim_revision
+                or assignment.revision.evidence_revision != citation.evidence_revision
+            ):
+                raise VerificationContractError(
+                    "citation is not backed by a current-valid edge"
+                )
+            citations_by_report.setdefault(report_claim.report_claim_id, set()).add(
+                assignment.revision.relation
+            )
         for item in response.decisions:
+            claim = claims[item.report_claim_id]
+            relations = citations_by_report.get(item.report_claim_id, set())
             if (
                 item.verdict is JudgeVerdict.SUPPORTED
-                and claims[item.report_claim_id].structural_support
+                and claim.structural_support
                 is not StructuralSupport.STRUCTURALLY_SUPPORTED
             ):
                 raise VerificationContractError(
                     "Judge SUPPORTED requires structural support"
                 )
-        return tuple(sorted(response.decisions, key=lambda item: item.report_claim_id))
+            if (
+                claim.publication_state is PublicationState.INCLUDED
+                and item.verdict in {JudgeVerdict.SUPPORTED, JudgeVerdict.QUALIFIED}
+                and ClaimEvidenceRelation.SUPPORTS not in relations
+            ):
+                raise VerificationContractError(
+                    "publishable claim requires a current-valid SUPPORTS citation"
+                )
+            if (
+                claim.publication_state is PublicationState.INCLUDED
+                and item.verdict is JudgeVerdict.QUALIFIED
+                and claim.structural_support is StructuralSupport.CONFLICTED
+                and ClaimEvidenceRelation.CONTRADICTS not in relations
+            ):
+                raise VerificationContractError(
+                    "qualified conflicted claim must disclose contradiction citation"
+                )
+        return (
+            tuple(sorted(response.decisions, key=lambda item: item.report_claim_id)),
+            tuple(
+                sorted(response.finding_dispositions, key=lambda item: item.finding_id)
+            ),
+        )
 
     @staticmethod
     def _validate_continue(
