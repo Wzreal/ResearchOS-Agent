@@ -28,7 +28,10 @@ from researchos.domain.contracts import (
     model_sha256,
 )
 from researchos.interfaces.lifecycle import Clock, RunStore, TraceSink
-from researchos.security.redaction import PersistenceRedactor
+from researchos.security.redaction import (
+    PersistenceRedactor,
+    prepare_persistent_run_input,
+)
 
 IdFactory = Callable[[str], str]
 
@@ -384,8 +387,7 @@ class RunManager:
         )
 
     def _prepare_input(self, run_input: RunInput) -> tuple[RunInput, bool]:
-        normalized = self._redactor.normalize_input(run_input)
-        return self._redactor.redact_input(normalized)
+        return prepare_persistent_run_input(run_input)
 
     def _sanitize_error(self, error: RunError) -> RunError:
         safe = self._redactor.redact_value(error.model_dump(mode="python"))

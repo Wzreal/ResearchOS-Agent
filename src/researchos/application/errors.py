@@ -291,3 +291,88 @@ class VerificationTraceCommitError(ResearchOSError):
         self.run_id = run_id
         self.verification_id = verification_id
         self.artifact_committed = True
+
+
+class EvaluationDatasetNotFound(ResearchOSError):
+    pass
+
+
+class EvaluationDatasetCompatibilityError(ResearchOSError):
+    pass
+
+
+class CorruptEvaluationDataset(ResearchOSError):
+    pass
+
+
+class EvaluationPreconditionError(ResearchOSError):
+    pass
+
+
+class CaseRunCompatibilityError(EvaluationPreconditionError):
+    pass
+
+
+class SUTHomogeneityError(EvaluationPreconditionError):
+    pass
+
+
+class EvaluationInputChanged(EvaluationPreconditionError):
+    pass
+
+
+class CorruptEvaluationInput(ResearchOSError):
+    pass
+
+
+class EvaluationContractError(ResearchOSError):
+    pass
+
+
+class EvaluationCancelled(ResearchOSError):
+    pass
+
+
+class EvaluationDeadlineExceeded(ResearchOSError):
+    pass
+
+
+class EvaluationModelFailure(ResearchOSError):
+    pass
+
+
+class EvaluationArtifactNotFound(ResearchOSError):
+    pass
+
+
+class CorruptEvaluationArtifact(ResearchOSError):
+    pass
+
+
+class EvaluationArtifactConflict(ResearchOSError):
+    pass
+
+
+class EvaluationPersistenceError(ResearchOSError):
+    def __init__(
+        self, message: str, *, artifact_id: str, authority_replaced: bool
+    ) -> None:
+        super().__init__(message)
+        self.artifact_id = artifact_id
+        self.authority_replaced = authority_replaced
+
+
+class MetricDefinitionCompatibilityError(ResearchOSError):
+    pass
+
+
+class EvaluationProvenanceError(ResearchOSError):
+    pass
+
+
+class IncompatibleEvaluationRuns(ResearchOSError):
+    pass
+
+
+class EvaluationComparisonError(ResearchOSError):
+    pass

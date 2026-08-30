@@ -689,3 +689,82 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   synthesis/verification result, replay avoids provider calls, and publication
   has one clear authority. New evidence acquisition is represented as a
   request artifact only; it is not executed inside the frozen invocation.
+
+## ADR-0023: Evaluate immutable artifact snapshots with typed replayable metrics
+
+- **Status:** Accepted
+- **Date:** 2026-08-30
+- **Context:** Phase 7 must compare planning, execution, evidence, citation,
+  and report behavior without mutating Runs, inventing unavailable values, or
+  treating an optional model judge as ground truth. Existing artifacts do not
+  include a unified manifest, invalid planning candidates, ranked retrieval
+  occurrences, or a fully verifiable SUT configuration bundle.
+- **Decision:** Evaluation freezes and hashes the existing Phase 2-6 artifacts
+  through a read-only boundary, validates every case/run binding before any
+  evaluator call, and stores results under a standalone evaluation root.
+  Reference annotations affect metrics only; only explicit required execution
+  conditions participate in compatibility. Source policy requirements use the
+  distinct `UNSPECIFIED`, `REQUIRE_NONE`, and `REQUIRE_EXACT` states.
+
+  A single EvaluationRun requires homogeneous observable SUT pins. Verified or
+  declared value conflicts fail; unobservable pins only downgrade provenance;
+  design absence is never encoded as a value. Comparison and ablation inherit
+  the weakest provenance, and an unverified configuration declaration cannot
+  be presented as a verified causal experiment.
+
+  Metric results are strict typed values with explicit computed,
+  not-applicable, skipped, unavailable, and error states. The authority stores
+  the exact metric definition snapshots. Evaluator bundle identity binds
+  evaluator versions, definition hashes, normalization versions, and
+  aggregation semantics. Deterministic evaluators independently recompute DAG,
+  current-edge, citation, and publication correctness from the lowest
+  authoritative snapshots instead of trusting reported conclusions.
+
+  When the optional judge is enabled, `evaluation_model_bundle_hash` is stored
+  in the authority and participates in both evaluator-bundle and EvaluationRun
+  identity, so a loader can verify that pin without external declarations.
+
+  Invocation policy bounds cases, metrics, artifact bytes, model context and
+  response bytes, duration, and the global model call count. Model evaluation
+  is optional, provider-independent, MOCK-only in Phase 7, exact-fixture, and
+  has no retry or fallback. Cancellation or deadline expiration publishes no
+  authority.
+
+  Semantic hashes exclude timestamps and persistence occurrence metadata;
+  physical artifact hashes cover the complete persisted artifact. Same-input
+  authority replay makes zero evaluator/model calls. Case artifacts commit
+  before the authoritative evaluation snapshot; this is not a WAL, checkpoint,
+  event source, or second runtime.
+
+  Freezing performs one bounded raw read per artifact and parses those exact
+  bytes. `PRESENT` means typed parsing succeeded; malformed bytes remain
+  addressable as `CORRUPT` with their original hash, size, and a sanitized
+  reason. Corruption fails only its Case when isolation is possible. All failed
+  Cases make the EvaluationRun failed; mixed failed/partial/completed Cases make
+  it partial. The final live fingerprint check is immediately adjacent to
+  authority publication.
+
+  SUT request pins are declarations only. Artifact verification requires an
+  artifact reference and byte hash; absent-by-design requires an explicit arm
+  declaration plus an actually absent artifact. Commit and system version are
+  declared identity pins, so they prevent an artifact-verified overall grade.
+  Pin-version conflict is a homogeneity error. A verified ablation intervention
+  may be either an artifact-verified value change or an explicit absence whose
+  artifact is confirmed absent; unchanged controls must be artifact-verifiable
+  or identically proven absent.
+
+  Numeric metrics, aggregates, and deltas use
+  `normalize_metric_decimal_v1`: finite Decimal arithmetic, twelve decimal
+  places, and `ROUND_HALF_EVEN`. Relative thresholds apply symmetrically to
+  regressions and improvements; `NO_DECREASE` has zero tolerance. `TARGET` and
+  informational metrics are not valid Phase 7 regression rules.
+
+  Evaluation, comparison, and ablation authorities use immutable same-ID
+  first-writer creation. Identical bytes replay idempotently; different bytes
+  raise a typed conflict, including under concurrent publication. Ablation
+  authority binds and validates the complete canonical `AblationSpec`.
+- **Consequences:** Offline comparisons remain reproducible and explainable,
+  missing data cannot become a favorable zero, and ablation claims retain
+  honest provenance. Retrieval ranking metrics, invalid-plan history, real
+  judges, execution orchestration, statistical release gates, and evaluation
+  trace exporters remain deferred.
