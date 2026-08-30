@@ -1,7 +1,7 @@
 # ResearchOS Agent Evaluation Plan
 
-**Status:** Metric design only. No experiments have been run and this document
-contains no measured results.
+**Status:** Phase 7 harness implemented. No benchmark experiments have been run
+and this document contains no measured results.
 
 ## Principles
 
@@ -140,3 +140,33 @@ licensed datasets and baseline runs exist. Before Phase 9, the project must:
 5. publish measured thresholds through an ADR or release policy.
 
 No Phase 0 claim should be interpreted as an experimental result.
+
+## 7. Phase 7 implemented metric bundle
+
+Phase 7 regression rules support higher/lower directional metrics only.
+`TARGET` and informational metrics remain reportable but are intentionally
+unsupported as regression gates until a versioned target-distance policy is
+defined. `NO_DECREASE` means zero allowed degradation; relative rules use
+relative thresholds for both regressions and improvements.
+
+The version-1 deterministic bundle currently computes, when its authoritative
+inputs are present:
+
+- planning DAG validity, capability feasibility, and task count;
+- task success/blocked ratios, retry count, and budget adherence;
+- current-valid claim support, unsupported/conflict ratios, and exact evidence
+  duplication;
+- citation integrity, publishable/cited claim ratios, unresolved findings,
+  recomputed verification disposition, and reported/recomputed consistency.
+
+The version-1 exact-reference bundle computes task and capability coverage,
+claim recall, evidence-constraint satisfaction, citation-edge recall, and
+expected disposition match only when the required annotations exist. A zero
+denominator is `NOT_APPLICABLE`; a missing source artifact is `UNAVAILABLE`.
+
+Rank-sensitive retrieval measures, actual-versus-estimated resource deviation,
+semantic plan redundancy, latency percentiles, unnecessary-execution detection,
+and factual-quality judging remain unavailable because current Phase 2-6
+authority does not persist sufficient inputs. The optional model evaluator does
+not fill those gaps implicitly; it emits only explicitly versioned metric
+definitions supplied to its exact MOCK fixture.

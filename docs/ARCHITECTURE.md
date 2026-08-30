@@ -274,7 +274,14 @@ reasons, and uncertainty. Ablations must hold datasets and evaluation policy
 constant while varying declared system components.
 
 Evaluation must not mutate the run being evaluated. Candidate metrics are
-defined in `EVALUATION.md`.
+defined in `EVALUATION.md`. Phase 7 implements this as separate domain,
+application, interface, and adapter modules: a read-only reader freezes and
+hashes Phase 2-6 files, compatibility and SUT homogeneity run before every
+evaluator, deterministic/reference evaluators emit strict typed metrics, and
+the harness publishes case snapshots before `evaluation.json` authority.
+Model evaluation is optional, MOCK-only, exact-fixture, and bounded across the
+whole invocation. Comparisons require identical dataset/case/policy and metric
+definition identities; ablations preserve the weakest observable provenance.
 
 ### 9. Observability
 
@@ -304,8 +311,8 @@ terminal publication. Secret redaction happens before persistence.
 5. Checkpoints commit task outcomes and budget state before dependents advance.
 6. Synthesis reads the graph and produces a claim-addressable draft.
 7. Bounded verification may add tasks/evidence or revise claim dispositions.
-8. Evaluation reads frozen artifacts; finalization writes the manifest and
-   exposes complete, partial, or failed status.
+8. Evaluation reads frozen artifacts and publishes a standalone EvaluationRun;
+   it never finalizes or otherwise mutates the evaluated Run.
 
 Phase 6 freezes the Phase 5 Claim Graph and Evidence Store once per invocation.
 It admits only whole Claim/Evidence items, derives structural support from the

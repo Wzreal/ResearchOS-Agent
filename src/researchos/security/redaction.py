@@ -84,3 +84,14 @@ class PersistenceRedactor:
             raise UnsafePersistenceData(
                 "domain object contains data requiring persistence redaction"
             )
+
+
+def prepare_persistent_run_input(run_input: RunInput) -> tuple[RunInput, bool]:
+    """The single Phase 1 normalize-then-redact input boundary.
+
+    Phase 7 reuses this exact operation for case/run compatibility rather than
+    maintaining a second approximation of persistent input identity.
+    """
+
+    redactor = PersistenceRedactor()
+    return redactor.redact_input(redactor.normalize_input(run_input))

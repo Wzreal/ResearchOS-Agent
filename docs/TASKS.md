@@ -112,10 +112,23 @@ not aspiration.
 
 ## Phase 7 — Evaluation harness
 
-- TODO — Add versioned datasets and deterministic fixture loader.
-- TODO — Implement retrieval, trajectory, and report evaluators.
-- TODO — Implement controlled ablation configuration and comparison.
-- TODO — Record metric provenance, skipped reasons, and uncertainty.
+- DONE — Add bounded, versioned evaluation datasets with canonical filesystem
+  and in-memory loaders plus explicit reference levels and execution conditions.
+- DONE — Implement read-only artifact freezing, fail-closed case/run binding,
+  homogeneous SUT pins, and independent planning/execution/evidence/citation/
+  verification recomputation.
+- DONE — Add exact reference evaluators and the optional provider-independent,
+  MOCK-only exact-fixture judge with a global invocation call bound.
+- DONE — Persist typed metric-definition snapshots, case artifacts, and
+  authority-last EvaluationRuns with separate semantic and physical hashes.
+- DONE — Implement deterministic aggregation, definition-safe regression
+  comparison, and provenance-preserving ablation validation.
+- DONE — Cover replay, tamper detection, unavailable semantics, compatibility,
+  model bounds, comparison thresholds, and Phase 2-6 regression behavior.
+- DONE — Harden one-read corrupt artifact isolation, strict SUT provenance,
+  Decimal metric semantics, bounded dispatch, independent current-edge/citation
+  recomputation, canonical ablation identity, and immutable concurrent
+  first-writer authorities.
 
 ## Phase 8 — Observability and resilience hardening
 
