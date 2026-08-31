@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import timedelta
 
 import pytest
@@ -22,7 +21,6 @@ from researchos.adapters.mock_execution import (
     MockTaskExecutionBackend,
     successful_result,
 )
-from researchos.adapters.mock_observability import MockObservationExporter
 from researchos.adapters.mock_verification import (
     MockVerificationModel,
     VerificationFixture,
@@ -643,8 +641,22 @@ def test_slow_exporter_does_not_consume_short_verification_deadline() -> None:
         evidence_store, claim_store, MockVerificationModel(fixtures), artifacts
     )
 
+    class BlockingExporter:
+        exporter_id = "blocking_exporter"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.completed = False
+
+        async def export(self, envelope) -> None:
+            del envelope
+            self.started.set()
+            await self.release.wait()
+            self.completed = True
+
     async def scenario():
-        exporter = MockObservationExporter(delay_seconds=5)
+        exporter = BlockingExporter()
         dispatcher = ExporterDispatcher(
             exporters=(exporter,),
             policy=ExporterPolicy(export_timeout_ms=10_000),
@@ -660,27 +672,36 @@ def test_slow_exporter_does_not_consume_short_verification_deadline() -> None:
             clock=FrozenClock(NOW),
             recorder=recorder,
         )
+        runs = StubRunManager(state)
         durable = DurableVerificationCoordinator(
-            run_manager=StubRunManager(state),
+            run_manager=runs,
             verification_service=service,
             operation_manager=operations,
             artifact_store=artifacts,
             observation_recorder=recorder,
         )
-        started = time.perf_counter()
-        result = await durable.execute(
-            run_id=state.run_id,
-            policy=policy,
-            hard_limits=HARD_LIMITS,
-            cancellation=NeverCancelled(),
+        business = asyncio.create_task(
+            durable.execute(
+                run_id=state.run_id,
+                policy=policy,
+                hard_limits=HARD_LIMITS,
+                cancellation=NeverCancelled(),
+            )
         )
-        elapsed = time.perf_counter() - started
-        await dispatcher.close(drain=False)
-        return result, elapsed
+        try:
+            await asyncio.wait_for(exporter.started.wait(), timeout=5)
+            result = await asyncio.wait_for(business, timeout=5)
+            assert exporter.completed is False
+            assert result == artifacts.load(state.run_id)
+            assert runs.state.status is RunStatus.EVALUATING
+            assert runs.transitions == [RunStatus.EVALUATING]
+            return result
+        finally:
+            exporter.release.set()
+            await dispatcher.close(drain=True)
 
-    result, elapsed = asyncio.run(scenario())
+    result = asyncio.run(scenario())
     assert result == artifacts.load(state.run_id)
-    assert elapsed < 0.5
 
 
 class FailNextPublicationStore(InMemoryVerificationArtifactStore):
