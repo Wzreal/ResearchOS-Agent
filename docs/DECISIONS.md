@@ -768,3 +768,99 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   honest provenance. Retrieval ranking metrics, invalid-plan history, real
   judges, execution orchestration, statistical release gates, and evaluation
   trace exporters remain deferred.
+
+## ADR-0024: Use a bounded verification operation journal and local-first observations
+
+- **Status:** Accepted
+- **Date:** 2026-08-30
+- **Context:** Phase 6 publishes a deterministic verification authority but an
+  interruption between model dispatches, response validation, publication,
+  trace append, and Run lifecycle transitions cannot yet be reconciled without
+  repeating an uncertain provider call. Optional exporters must not weaken
+  local durability or consume the business deadline.
+- **Decision:** Add one bounded
+  `verification_operations/<verification_id>.json` snapshot per verification
+  generation. `DurableVerificationCoordinator` owns lifecycle only,
+  `VerificationOperationManager` owns checkpoint/CAS/call-journal/outbox,
+  existing `VerificationService` retains all Phase 6 correctness, and
+  `ObservationRecorder` owns diagnostics and export offering. The operation is
+  not a second result authority, runtime, Run state, or trace.
+
+  Every model call is durably PREPARED and DISPATCHED before provider work.
+  Preparation pins stable stage/call identity, bundle, request/response schema,
+  safe structured input identity, canonical request hash, and predecessor
+  response hashes. Recovery reconstructs the canonical request and validates
+  every pin before replaying a RESPONSE_COMMITTED typed payload. Raw prompts,
+  provider requests, and raw responses are not persisted. A DISPATCHED call
+  without a committed validated response becomes INTERRUPTED_UNKNOWN with
+  UNKNOWN usage and receives no transparent retry. Existing Phase 6 semantics,
+  not the durability layer, decide all subsequent business behavior.
+
+  The operation immutably pins invocation hard limits and, at
+  READY_TO_PUBLISH, the complete validated `VerificationResult`, exact rendered
+  Markdown text/bytes, both content hashes, predecessor authority, and stable
+  publication key. Recovery publishes that exact occurrence rather than
+  rebuilding timestamped output. Multiple generations for one Run coexist so
+  an explicitly declared prior authority can be superseded without an old
+  completed operation blocking the new verification.
+
+  Filesystem updates use a shared per-operation in-process lock. Inside the
+  lock the adapter reloads current revision, validates expected N and proposed
+  N+1, then atomically replaces and fsyncs the snapshot. Observation delivery
+  reuses immutable trace descriptors and idempotent append: equal ID/hash is a
+  no-op, conflicting content is corruption. Checkpoints have a configurable
+  default byte bound and an absolute 64 MiB ceiling, enforced before replace
+  and during load in memory and filesystem adapters. Local append-once is
+  synchronous but delivery failure never reverses a committed business mutation;
+  optional exporter delivery is a nonblocking `put_nowait` into an in-process,
+  bounded, best-effort dispatcher. Remote work is never awaited by business
+  orchestration. Export failure/drop diagnostics are local-only, include the
+  exporter identity, cannot recurse, and execute through a bounded daemon-thread
+  diagnostic queue rather than the asyncio business loop. Queue-full and
+  dispatcher-stopped diagnostics use that same off-loop boundary; if its bounded
+  queue is full, the diagnostic may be dropped because the original event is
+  already locally durable.
+
+  Critical outbox capacity is proved before entering VERIFYING using
+  `12 + 3*(1 + 3*max_rounds) + 2*16`. Phase 6's maximum is 137 descriptors,
+  within 160 reserved critical slots and 256 total slots. An invalid future
+  bound fails preflight. Recovery attempts 1..16 are durable CAS mutations;
+  attempt 17 raises a typed limit error without mutation or business action.
+  Recovery STARTED is checkpointed at entry; COMPLETED is emitted only after
+  actual reconciliation. Known failed calls terminalize the operation as
+  FAILED, explicit cancellation as CANCELLED, and unknowable in-flight outcomes
+  as INTERRUPTED_UNKNOWN.
+
+  Before `RUNNING -> VERIFYING`, lifecycle orchestration loads and reconciles
+  the existing Phase 3 checkpoint, matches its Run/revision and embedded DAG
+  identity, requires `ExecutorStatus.COMPLETED`, and rejects unsafe outstanding
+  attempts, retries, replans, cancellation, reservations, or uncertain
+  consumption. Failure creates no verification operation and makes no model
+  call. Provider/client exceptions after durable DISPATCHED are
+  INTERRUPTED_UNKNOWN unless no external execution is provable. Deterministic
+  predispatch deadline/request failures terminalize once as FAILED, and
+  explicit predispatch cancellation once as CANCELLED.
+
+  Operation storage exposes bounded per-Run generation discovery. A new target
+  cannot bypass an unfinished, unknown, authority-less failed/cancelled, or
+  authority-less publication-ready generation after mutable inputs change.
+  Creation is legitimate only after the exact current authority has a matching
+  completed operation and is explicitly pinned as predecessor. Matching
+  completed-authority recovery may settle pending local outbox entries best
+  effort, but performs no model work, lifecycle mutation, or result mutation.
+
+  A legacy authority is validated from its own identity, integrity, and pins
+  before bootstrapping an operation. Current Claim/Evidence state is only a
+  consistency check and cannot redefine historical authority. Authority
+  precedence never overrides a mismatch. Lineage is independently rebuilt
+  from citations, current-valid SUPPORTS edges, exact evidence revision/content
+  and source pins, receipts, and runtime provenance;
+  persisted citation assignments are diagnostics only.
+- **Consequences:** Committed responses and authorities replay without provider
+  calls, uncertain dispatches are not duplicated, concurrent in-process writers
+  have one CAS winner, path-lock registry entries are released after use, and
+  local observations survive exporter failure. Matching authorities on Runs
+  already beyond EVALUATING replay read-only; optional outbox omission uses its
+  own semantic event rather than remote-delivery-drop terminology. Durable
+  remote delivery, exporter retry, cross-process leases, real integrations, and
+  resolution of unknown provider outcomes remain Phase 9 work.

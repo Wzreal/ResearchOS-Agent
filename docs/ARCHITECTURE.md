@@ -300,6 +300,35 @@ planner/replan decisions, tool calls, evidence/claim mutations, checkpoint
 commits, verification outcomes, budget decisions, evaluation results, and
 terminal publication. Secret redaction happens before persistence.
 
+Phase 8 extends this boundary without replacing `trace.jsonl`. Verification
+model calls have bounded, per-generation
+`verification_operations/<verification_id>.json` snapshots containing safe
+request proofs, hard-limit pins, validated typed response payloads, immutable
+trace descriptors, and an exact READY_TO_PUBLISH candidate. The candidate
+freezes the complete result occurrence and rendered Markdown across a crash;
+the existing `VerificationResult` remains the sole result authority. Operation
+updates use in-process filesystem CAS and a 64 MiB hard ceiling; prepared calls
+survive a crash, committed responses replay without provider work, and
+dispatched calls without a committed response become an explicit unknown
+outcome.
+
+The `RUNNING -> VERIFYING` edge is gated by the reconciled Phase 3 checkpoint:
+Run/revision and embedded DAG pins must match, the executor must be COMPLETED,
+and no unsafe attempt, retry, replan, cancellation, reservation, or uncertain
+consumption may remain. Verification generations are enumerated per Run before
+creation; unresolved generations cannot be bypassed by mutable input or policy
+changes. Only a completed generation matching current authority and an explicit
+predecessor pin may be superseded.
+
+Local descriptor-level append-once recording is the only synchronous
+observation step. Optional exporters receive envelopes through a nonblocking,
+bounded, in-process dispatcher after local durability. Export latency,
+backpressure, failure, or process exit cannot alter verification correctness,
+usage, deadline, or Run lifecycle. Durable remote export and cross-process
+operation leases remain outside Phase 8. Export-failure and delivery-drop
+filesystem diagnostics run through a separate bounded daemon-thread queue and
+never block the asyncio business loop.
+
 ## Primary data flow
 
 1. The request enters `RunManager`; validated inputs and mode are persisted.

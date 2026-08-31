@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 
 from researchos.adapters.claim_memory import InMemoryClaimGraphStore
 from researchos.adapters.evidence_memory import InMemoryEvidenceStore
@@ -13,6 +14,7 @@ from researchos.application.errors import (
     VerificationInputChanged,
     VerificationPreconditionError,
     VerificationTraceCommitError,
+    VerificationUsageUncertain,
 )
 from researchos.application.verification_coordinator import (
     VerificationCoordinator,
@@ -36,6 +38,7 @@ from researchos.domain.identity import stable_hash, stable_id
 from researchos.domain.runtime import RuntimeResourceAmount
 from researchos.domain.synthesis import (
     CitationAssignment,
+    FrozenVerificationInput,
     JudgeVerdict,
     VerificationPolicy,
     VerificationResult,
@@ -43,7 +46,10 @@ from researchos.domain.synthesis import (
 from researchos.interfaces.evidence import ClaimGraphStore, EvidenceStore
 from researchos.interfaces.lifecycle import Clock, TraceSink
 from researchos.interfaces.runtime import CancellationSignal
-from researchos.interfaces.verification import VerificationArtifactStore
+from researchos.interfaces.verification import (
+    VerificationArtifactStore,
+    VerificationCallJournal,
+)
 from researchos.security.redaction import PersistenceRedactor
 
 
@@ -66,6 +72,10 @@ class VerificationService:
         self._trace = trace_sink
         self._redactor = PersistenceRedactor()
 
+    @property
+    def model_bundle_hash(self) -> str:
+        return self._coordinator.model_bundle_hash
+
     async def verify(
         self,
         *,
@@ -74,28 +84,44 @@ class VerificationService:
         hard_limits: RuntimeResourceAmount,
         cancellation: CancellationSignal,
         expected_prior_verification_id: str | None = None,
+        frozen_input: FrozenVerificationInput | None = None,
+        call_journal: VerificationCallJournal | None = None,
+        event_sink: Callable[[TraceEvent], None] | None = None,
     ) -> VerificationResult:
         if run_state.status is not RunStatus.VERIFYING:
             raise VerificationPreconditionError("run must already be VERIFYING")
 
         # Locked replay order: freeze, hash (inside freeze), identity, lookup.
-        frozen = freeze_verification_input(
+        frozen = frozen_input or freeze_verification_input(
             run_id=run_state.run_id,
             run_revision=run_state.revision,
             claim_store=self._claims,
             evidence_store=self._evidence,
             policy=policy,
         )
+        if (
+            frozen.run_id != run_state.run_id
+            or frozen.run_revision != run_state.revision
+        ):
+            raise VerificationPreconditionError(
+                "prepared verification input belongs to another Run revision"
+            )
         verification_id = compute_verification_id(
             frozen, policy, self._coordinator.model_bundle_hash
         )
+        def emit(event_type: TraceEventType, attributes: dict[str, object]) -> None:
+            self._emit(
+                run_state,
+                event_type,
+                verification_id,
+                attributes,
+                event_sink=event_sink,
+            )
         existing = self._artifacts.load(run_state.run_id)
         if existing is not None and existing.verification_id == verification_id:
             reconciled = self._artifacts.reconcile_report(run_state.run_id)
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_PUBLICATION_REPLAYED,
-                verification_id,
                 {"report_reconciled": reconciled},
             )
             return existing
@@ -111,10 +137,8 @@ class VerificationService:
                 "expected prior verification artifact is absent"
             )
 
-        self._emit(
-            run_state,
+        emit(
             TraceEventType.VERIFICATION_STARTED,
-            verification_id,
             {
                 "frozen_input_hash": frozen.frozen_input_hash,
                 "selected_claim_count": len(frozen.selected_claim_ids),
@@ -143,22 +167,27 @@ class VerificationService:
                 cancellation=cancellation,
                 expected_mode=run_state.config.mode,
                 event_callback=lambda event_type, attributes: self._emit(
-                    run_state, event_type, verification_id, attributes
+                    run_state,
+                    event_type,
+                    verification_id,
+                    attributes,
+                    event_sink=event_sink,
                 ),
+                call_journal=call_journal,
             )
         except VerificationCancelled:
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_CANCELLED,
-                verification_id,
                 {"failure_code": "verification_cancelled"},
             )
             raise
+        except VerificationUsageUncertain:
+            # The durable call journal already emitted the precise terminal
+            # interrupted-unknown event. Do not mislabel it as known failure.
+            raise
         except Exception as exc:
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_FAILED,
-                verification_id,
                 {"failure_code": type(exc).__name__},
             )
             raise
@@ -182,10 +211,8 @@ class VerificationService:
             or evidence_revision != frozen.evidence_snapshot.store_revision
             or evidence_hash != frozen.evidence_snapshot_hash
         ):
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_FAILED,
-                verification_id,
                 {"failure_code": "verification_input_changed"},
             )
             raise VerificationInputChanged("verification_input_changed")
@@ -220,10 +247,8 @@ class VerificationService:
             omitted_claim_ids=frozen.omitted_claim_ids,
         )
         if len(markdown) > policy.max_report_bytes:
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_FAILED,
-                verification_id,
                 {"failure_code": "report_bound_exceeded"},
             )
             raise VerificationPreconditionError("report exceeds configured byte limit")
@@ -290,14 +315,20 @@ class VerificationService:
         )
         self._redactor.assert_safe_model(result)
         if len(canonical_json_bytes(result)) > policy.max_verification_artifact_bytes:
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_FAILED,
-                verification_id,
                 {"failure_code": "artifact_bound_exceeded"},
             )
             raise VerificationPreconditionError(
                 "verification artifact exceeds byte limit"
+            )
+        if call_journal is not None:
+            # Phase 8 persists only the publication boundary here; all result
+            # construction and correctness remain owned by this Phase 6 service.
+            call_journal.mark_ready_to_publish(
+                result,
+                markdown,
+                expected_prior_verification_id=expected_prior_verification_id,
             )
         try:
             self._artifacts.publish(
@@ -306,18 +337,14 @@ class VerificationService:
                 expected_prior_verification_id=expected_prior_verification_id,
             )
         except Exception as exc:
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_FAILED,
-                verification_id,
                 {"failure_code": type(exc).__name__},
             )
             raise
         try:
-            self._emit(
-                run_state,
+            emit(
                 TraceEventType.VERIFICATION_COMPLETED,
-                verification_id,
                 {
                     "disposition": disposition.value,
                     "draft_revision_id": draft.draft_revision_id,
@@ -340,6 +367,8 @@ class VerificationService:
         event_type: TraceEventType,
         verification_id: str,
         attributes: dict[str, object],
+        *,
+        event_sink: Callable[[TraceEvent], None] | None = None,
     ) -> None:
         event = TraceEvent(
             event_id=stable_id(
@@ -354,7 +383,34 @@ class VerificationService:
             attributes={"verification_id": verification_id, **attributes},
         )
         self._redactor.assert_safe_model(event)
-        self._trace.append(event)
+        (event_sink or self._trace.append)(event)
+
+    def prepare_invocation(
+        self, *, run_state: RunState, policy: VerificationPolicy
+    ) -> tuple[FrozenVerificationInput, str]:
+        if run_state.status is not RunStatus.VERIFYING:
+            raise VerificationPreconditionError("run must already be VERIFYING")
+        frozen = freeze_verification_input(
+            run_id=run_state.run_id,
+            run_revision=run_state.revision,
+            claim_store=self._claims,
+            evidence_store=self._evidence,
+            policy=policy,
+        )
+        return frozen, compute_verification_id(
+            frozen, policy, self._coordinator.model_bundle_hash
+        )
+
+    def freeze_input(
+        self, *, run_id: str, run_revision: int, policy: VerificationPolicy
+    ) -> FrozenVerificationInput:
+        return freeze_verification_input(
+            run_id=run_id,
+            run_revision=run_revision,
+            claim_store=self._claims,
+            evidence_store=self._evidence,
+            policy=policy,
+        )
 
     @staticmethod
     def _snapshot_fingerprint(store: object, run_id: str) -> tuple[int, str]:

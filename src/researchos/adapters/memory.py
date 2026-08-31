@@ -6,11 +6,14 @@ from threading import RLock
 
 from researchos.application.errors import (
     CorruptRunState,
+    ObservationCorruption,
     RevisionConflict,
     RunAlreadyExists,
     RunNotFound,
 )
 from researchos.domain.contracts import RunState, TraceEvent, model_sha256
+from researchos.domain.observability import AppendOnceResult
+from researchos.domain.runtime import TraceEventDescriptor
 from researchos.security.redaction import PersistenceRedactor
 
 
@@ -70,6 +73,30 @@ class InMemoryTraceSink:
         with self._lock:
             copied = event.model_copy(deep=True)
             self._events.setdefault(event.run_id, []).append(copied)
+
+    def append_once(self, descriptor: TraceEventDescriptor) -> AppendOnceResult:
+        event = descriptor.to_event()
+        self._redactor.assert_safe_model(event)
+        with self._lock:
+            matches = [
+                item
+                for item in self._events.get(event.run_id, [])
+                if item.event_id == event.event_id
+            ]
+            if len(matches) > 1:
+                raise ObservationCorruption(
+                    "trace contains duplicate physical event identity"
+                )
+            if matches:
+                if model_sha256(matches[0]) != descriptor.canonical_event_hash:
+                    raise ObservationCorruption(
+                        "trace event identity has different canonical content"
+                    )
+                return AppendOnceResult.ALREADY_PRESENT
+            self._events.setdefault(event.run_id, []).append(
+                event.model_copy(deep=True)
+            )
+            return AppendOnceResult.APPENDED
 
     def read(
         self, run_id: str, *, recover_torn_tail: bool = False

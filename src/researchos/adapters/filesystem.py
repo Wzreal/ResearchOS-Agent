@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 
@@ -14,6 +15,7 @@ from researchos.adapters._atomic_file import AtomicWriteFailure, atomic_replace_
 from researchos.application.errors import (
     CorruptRunState,
     IncompatibleSchema,
+    ObservationCorruption,
     RevisionConflict,
     RunAlreadyExists,
     RunNotFound,
@@ -27,9 +29,34 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
+from researchos.domain.observability import AppendOnceResult
+from researchos.domain.runtime import TraceEventDescriptor
 from researchos.security.redaction import PersistenceRedactor
 
 FaultInjector = Callable[[str], None]
+_TRACE_LOCKS_GUARD = RLock()
+_TRACE_PATH_LOCKS: dict[str, tuple[RLock, int]] = {}
+
+
+@contextmanager
+def _trace_path_lock(path: Path) -> Iterator[None]:
+    # Windows ``Path.resolve`` changes to a ``\\?\`` spelling after creation;
+    # use one lexical absolute spelling so pre/post-create callers share a lock.
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _TRACE_LOCKS_GUARD:
+        lock, users = _TRACE_PATH_LOCKS.get(key, (RLock(), 0))
+        _TRACE_PATH_LOCKS[key] = (lock, users + 1)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        with _TRACE_LOCKS_GUARD:
+            lock.release()
+            current_lock, current_users = _TRACE_PATH_LOCKS[key]
+            if current_users == 1:
+                del _TRACE_PATH_LOCKS[key]
+            else:
+                _TRACE_PATH_LOCKS[key] = (current_lock, current_users - 1)
 
 
 def _no_fault(_: str) -> None:
@@ -135,31 +162,60 @@ class FilesystemTraceSink(_FilesystemBase):
             run_dir = self._run_dir(event.run_id)
             run_dir.mkdir(parents=True, exist_ok=True)
             path = run_dir / self.trace_filename
-            self._read_path(
-                path,
-                expected_run_id=event.run_id,
-                recover_torn_tail=True,
-            )
-            data = canonical_json_bytes(event) + b"\n"
-            self._fault("before_trace_append")
-            with path.open("ab") as handle:
-                handle.write(data)
-                self._fault("after_trace_write")
-                handle.flush()
-                self._fault("after_trace_flush")
-                os.fsync(handle.fileno())
-                self._fault("after_trace_fsync")
+            with _trace_path_lock(path):
+                self._read_path(
+                    path,
+                    expected_run_id=event.run_id,
+                    recover_torn_tail=True,
+                )
+                self._append_event_unlocked(path, event)
+
+    def append_once(self, descriptor: TraceEventDescriptor) -> AppendOnceResult:
+        event = descriptor.to_event()
+        self._redactor.assert_safe_model(event)
+        with self._lock:
+            path = self._run_dir(event.run_id) / self.trace_filename
+            with _trace_path_lock(path):
+                events = self._read_path(
+                    path, expected_run_id=event.run_id, recover_torn_tail=True
+                )
+                matches = [item for item in events if item.event_id == event.event_id]
+                if len(matches) > 1:
+                    raise ObservationCorruption(
+                        "trace contains duplicate physical event identity"
+                    )
+                if matches:
+                    if model_sha256(matches[0]) != descriptor.canonical_event_hash:
+                        raise ObservationCorruption(
+                            "trace event identity has different canonical content"
+                        )
+                    return AppendOnceResult.ALREADY_PRESENT
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._append_event_unlocked(path, event)
+                return AppendOnceResult.APPENDED
+
+    def _append_event_unlocked(self, path: Path, event: TraceEvent) -> None:
+        data = canonical_json_bytes(event) + b"\n"
+        self._fault("before_trace_append")
+        with path.open("ab") as handle:
+            handle.write(data)
+            self._fault("after_trace_write")
+            handle.flush()
+            self._fault("after_trace_flush")
+            os.fsync(handle.fileno())
+            self._fault("after_trace_fsync")
 
     def read(
         self, run_id: str, *, recover_torn_tail: bool = False
     ) -> tuple[TraceEvent, ...]:
         with self._lock:
             path = self._run_dir(run_id) / self.trace_filename
-            return self._read_path(
-                path,
-                expected_run_id=run_id,
-                recover_torn_tail=recover_torn_tail,
-            )
+            with _trace_path_lock(path):
+                return self._read_path(
+                    path,
+                    expected_run_id=run_id,
+                    recover_torn_tail=recover_torn_tail,
+                )
 
     def _read_path(
         self,

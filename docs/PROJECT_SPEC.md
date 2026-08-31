@@ -109,6 +109,8 @@ outputs/<run_id>/
 ├── report.md
 ├── run_state.json
 ├── checkpoint.json
+├── verification_operations/
+│   └── <verification_id>.json
 ├── trace.jsonl
 ├── evidence.jsonl
 ├── claims.jsonl
@@ -123,6 +125,11 @@ outputs/<run_id>/
 - `checkpoint.json` is the Phase 3 atomic DAG-runtime snapshot. It stores the
   validated DAG/policy hashes, attempts, outcomes, budget/replan state, and the
   immutable last-mutation trace outbox used for bounded reconciliation.
+- `verification_operations/<verification_id>.json` is the Phase 8 bounded,
+  generation-specific verification checkpoint and validated model-call journal.
+  It can freeze a publication candidate for crash replay but is not the
+  authoritative verification result and never stores raw prompts or provider
+  responses.
 - `trace.jsonl` is append-only and contains structured, timestamped events.
 - `evidence.jsonl` and `claims.jsonl` contain versioned normalized records.
 - `report.md` cites claim/evidence identifiers using a documented convention.
