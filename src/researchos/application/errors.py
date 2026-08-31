@@ -293,6 +293,62 @@ class VerificationTraceCommitError(ResearchOSError):
         self.artifact_committed = True
 
 
+class VerificationOperationNotFound(ResearchOSError):
+    pass
+
+
+class VerificationOperationAlreadyExists(ResearchOSError):
+    pass
+
+
+class VerificationOperationRevisionConflict(ResearchOSError):
+    pass
+
+
+class CorruptVerificationOperation(ResearchOSError):
+    pass
+
+
+class VerificationOperationPersistenceError(ResearchOSError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation_id: str,
+        checkpoint_revision: int,
+        checkpoint_replaced: bool,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.checkpoint_revision = checkpoint_revision
+        self.checkpoint_replaced = checkpoint_replaced
+
+
+class VerificationRecoveryInconsistency(ResearchOSError):
+    pass
+
+
+class RecoveryAttemptLimitExceeded(ResearchOSError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation_id: str,
+        run_id: str,
+        current_attempts: int,
+        limit: int,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.run_id = run_id
+        self.current_attempts = current_attempts
+        self.limit = limit
+
+
+class ObservationCorruption(ResearchOSError):
+    pass
+
+
 class EvaluationDatasetNotFound(ResearchOSError):
     pass
 

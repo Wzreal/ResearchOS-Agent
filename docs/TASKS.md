@@ -132,10 +132,28 @@ not aspiration.
 
 ## Phase 8 — Observability and resilience hardening
 
-- TODO — Complete versioned trace schemas and correlation coverage.
-- TODO — Add redaction, fault-injection, crash-recovery, and load tests.
-- TODO — Add optional exporter interface and explicit exporter failures.
-- TODO — Publish operator diagnostics and recovery runbook.
+- DONE — Add a bounded durable verification-operation checkpoint with stable
+  request proofs, validated response replay, UNKNOWN interruption semantics,
+  and authority-first lifecycle reconciliation.
+- DONE — Implement in-memory and filesystem operation stores with shared-lock
+  in-process CAS, defensive validation, atomic replace, and typed corruption.
+- DONE — Add descriptor-level local trace append-once, correlated observation
+  envelopes, deterministic critical-outbox capacity, and independently rebuilt
+  verification lineage.
+- DONE — Add a nonblocking bounded optional exporter dispatcher with timeout,
+  failure/backpressure isolation, local-only diagnostics, and no fallback.
+- DONE — Cover model-call crash windows, response/authority replay, concurrent
+  CAS and recovery attempts, legacy authority bootstrap, redaction, exporter
+  isolation, cancellation/deadline, and complete Phase 1-7 regression.
+- DONE — Harden immutable READY publication replay, hard-limit compatibility,
+  verification generations/supersession, best-effort trace settlement, terminal
+  outcomes, checkpoint byte ceilings, diagnostic thread isolation, SUPPORTS
+  lineage, terminal Run replay, and recovery-event ordering.
+- DONE — Enforce the Phase 3 terminal checkpoint gate, unknown provider
+  transport outcomes, off-loop delivery-drop diagnostics, unresolved-generation
+  exclusion, one-time predispatch terminals, and terminal trace taxonomy.
+- DONE — Publish ADR-0024, Phase 8 design documentation, and the recovery
+  runbook.
 
 ## Phase 9 — Real integrations and production readiness
 

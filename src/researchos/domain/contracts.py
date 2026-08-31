@@ -163,6 +163,23 @@ class TraceEventType(StrEnum):
     VERIFICATION_CANCELLED = "verification.cancelled"
     VERIFICATION_PUBLICATION_REPLAYED = "verification.publication_replayed"
     VERIFICATION_REPORT_RECONCILED = "verification.report_reconciled"
+    VERIFICATION_OPERATION_INITIALIZED = "verification.operation_initialized"
+    VERIFICATION_OPERATION_RECOVERY_STARTED = "verification.operation_recovery_started"
+    VERIFICATION_OPERATION_RECOVERY_COMPLETED = (
+        "verification.operation_recovery_completed"
+    )
+    VERIFICATION_MODEL_CALL_PREPARED = "verification.model_call_prepared"
+    VERIFICATION_MODEL_CALL_DISPATCHED = "verification.model_call_dispatched"
+    VERIFICATION_MODEL_RESPONSE_COMMITTED = "verification.model_response_committed"
+    VERIFICATION_MODEL_CALL_INTERRUPTED_UNKNOWN = (
+        "verification.model_call_interrupted_unknown"
+    )
+    VERIFICATION_AUTHORITY_COMMITTED = "verification.authority_committed"
+    VERIFICATION_LIFECYCLE_COMMITTED = "verification.lifecycle_committed"
+    VERIFICATION_LINEAGE_RECONSTRUCTED = "verification.lineage_reconstructed"
+    OBSERVABILITY_EXPORT_FAILED = "observability.export_failed"
+    OBSERVABILITY_DELIVERY_DROPPED = "observability.delivery_dropped"
+    OBSERVABILITY_OPTIONAL_OMITTED = "observability.optional_omitted"
 
 
 class RunInput(ContractModel):

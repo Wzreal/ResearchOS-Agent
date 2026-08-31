@@ -59,9 +59,13 @@ from researchos.domain.synthesis import (
     VerificationRoundRecord,
     VerificationTerminationReason,
 )
+from researchos.domain.verification_runtime import ModelCallStatus
 from researchos.interfaces.lifecycle import Clock
 from researchos.interfaces.runtime import CancellationSignal
-from researchos.interfaces.verification import VerificationModel
+from researchos.interfaces.verification import (
+    VerificationCallJournal,
+    VerificationModel,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -95,6 +99,7 @@ class VerificationCoordinator:
         expected_mode: OperatingMode = OperatingMode.MOCK,
         event_callback: Callable[[TraceEventType, dict[str, object]], None]
         | None = None,
+        call_journal: VerificationCallJournal | None = None,
     ) -> tuple[
         ReportDraftRevision,
         tuple[ReportDraftRevision, ...],
@@ -131,6 +136,7 @@ class VerificationCoordinator:
             deadline,
             cancellation,
             accumulator=accumulator,
+            call_journal=call_journal,
         )
         draft = self._initial_draft(synthesis_id, candidate, frozen, policy)
         draft_revisions = [draft]
@@ -162,6 +168,7 @@ class VerificationCoordinator:
                 deadline,
                 cancellation,
                 accumulator=accumulator,
+                call_journal=call_journal,
             )
             current_findings = self._validate_findings(
                 verification_id, red, draft, frozen
@@ -203,6 +210,7 @@ class VerificationCoordinator:
                 deadline,
                 cancellation,
                 accumulator=accumulator,
+                call_journal=call_journal,
             )
             self._notify(
                 accumulator,
@@ -244,6 +252,7 @@ class VerificationCoordinator:
                 deadline,
                 cancellation,
                 accumulator=accumulator,
+                call_journal=call_journal,
             )
             decisions, dispositions = self._validate_judge(
                 judge, draft, round_open, frozen
@@ -343,6 +352,7 @@ class VerificationCoordinator:
         cancellation: CancellationSignal,
         *,
         accumulator: VerificationExecutionAccumulator | None = None,
+        call_journal: VerificationCallJournal | None = None,
     ) -> T:
         accumulator = accumulator or VerificationExecutionAccumulator()
         encoded_request = canonical_json_bytes(request)
@@ -355,6 +365,33 @@ class VerificationCoordinator:
             timeout = (deadline - self._clock.now()).total_seconds()
             if timeout <= 0:
                 raise VerificationDeadlineExceeded("verification deadline elapsed")
+        prepared = None
+        replay = None
+        if call_journal is not None:
+            response_contract_version = f"{response_type.__name__.lower()}_v1"
+            prepared, replay = call_journal.prepare(
+                request, response_contract_version=response_contract_version
+            )
+        if replay is not None:
+            if replay.response_size_bytes > policy.max_model_response_bytes:
+                raise VerificationContractError(
+                    "committed model response exceeds byte limit"
+                )
+            if replay.mode != accumulator.expected_mode.value:
+                raise VerificationContractError(
+                    "committed verification model mode mismatch"
+                )
+            response_payload = response_type.model_validate(replay.validated_payload)
+            self._accumulate_usage(
+                accumulator,
+                replay.usage,
+                replay.usage_certainty,
+                hard_limits,
+                request.role,
+            )
+            return response_payload
+        if prepared is not None:
+            call_journal.mark_dispatched(prepared)
         model_task = asyncio.create_task(self._model.invoke(request, cancellation))
         cancel_task = asyncio.create_task(cancellation.wait())
         done, _ = await asyncio.wait(
@@ -366,51 +403,148 @@ class VerificationCoordinator:
             model_task.cancel()
             await asyncio.gather(model_task, return_exceptions=True)
             if cancel_task in done or cancellation.cancelled:
+                if prepared is not None:
+                    call_journal.mark_terminal(
+                        prepared,
+                        status=ModelCallStatus.CANCELLED,
+                        failure_code="verification_cancelled",
+                        usage_certainty=UsageCertainty.UNKNOWN,
+                        usage=None,
+                    )
                 raise VerificationCancelled("verification cancelled")
             cancel_task.cancel()
+            if prepared is not None:
+                call_journal.mark_terminal(
+                    prepared,
+                    status=ModelCallStatus.TIMED_OUT,
+                    failure_code="verification_deadline_exceeded",
+                    usage_certainty=UsageCertainty.UNKNOWN,
+                    usage=None,
+                )
             raise VerificationDeadlineExceeded("verification model call timed out")
         cancel_task.cancel()
         await asyncio.gather(cancel_task, return_exceptions=True)
         try:
             response = await model_task
-        except (VerificationCancelled, VerificationDeadlineExceeded):
+        except VerificationCancelled:
+            if prepared is not None:
+                call_journal.mark_terminal(
+                    prepared,
+                    status=ModelCallStatus.CANCELLED,
+                    failure_code="verification_cancelled",
+                    usage_certainty=UsageCertainty.UNKNOWN,
+                    usage=None,
+                )
+            raise
+        except VerificationDeadlineExceeded:
+            if prepared is not None:
+                call_journal.mark_terminal(
+                    prepared,
+                    status=ModelCallStatus.TIMED_OUT,
+                    failure_code="verification_deadline_exceeded",
+                    usage_certainty=UsageCertainty.UNKNOWN,
+                    usage=None,
+                )
             raise
         except Exception as exc:
+            if prepared is not None:
+                call_journal.mark_terminal(
+                    prepared,
+                    status=ModelCallStatus.INTERRUPTED_UNKNOWN,
+                    failure_code="verification_provider_outcome_unknown",
+                    usage_certainty=UsageCertainty.UNKNOWN,
+                    usage=None,
+                )
+                raise VerificationUsageUncertain(
+                    "verification provider outcome is unknown"
+                ) from exc
             raise VerificationModelFailure("verification provider failed") from exc
         if len(response.raw_bytes) > policy.max_model_response_bytes:
+            self._mark_invalid_response(call_journal, prepared, response)
             raise VerificationContractError("model response exceeds byte limit")
         if response.mode != accumulator.expected_mode.value:
+            self._mark_invalid_response(call_journal, prepared, response)
             raise VerificationContractError("verification model mode mismatch")
         if (
             response.role is not request.role
             or response.round_number != request.round_number
             or response.draft_revision_id != request.draft_revision_id
         ):
+            self._mark_invalid_response(call_journal, prepared, response)
             raise VerificationContractError("verification response identity mismatch")
-        accumulator.usage = accumulator.usage.plus(response.usage)
-        if response.usage_certainty is UsageCertainty.UNKNOWN:
+        try:
+            # Preserve the Phase 6 ownership/order: provider usage is accounted
+            # before an untrusted payload is parsed.
+            self._accumulate_usage(
+                accumulator,
+                response.usage,
+                response.usage_certainty,
+                hard_limits,
+                request.role,
+            )
+        except (VerificationContractError, VerificationUsageUncertain):
+            self._mark_invalid_response(
+                call_journal,
+                prepared,
+                response,
+                failure_code="verification_usage_rejected",
+            )
+            raise
+        try:
+            payload = json.loads(response.raw_bytes)
+            validated = response_type.model_validate(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+            self._mark_invalid_response(call_journal, prepared, response)
+            raise VerificationModelFailure(
+                "verification model response is malformed"
+            ) from exc
+        if prepared is not None:
+            call_journal.commit_response(
+                prepared,
+                validated_payload=validated.model_dump(mode="json"),
+                response=response,
+            )
+        return validated
+
+    @staticmethod
+    def _mark_invalid_response(
+        call_journal: VerificationCallJournal | None,
+        prepared,
+        response,
+        *,
+        failure_code: str = "verification_response_invalid",
+    ) -> None:
+        if call_journal is not None and prepared is not None:
+            call_journal.mark_terminal(
+                prepared,
+                status=ModelCallStatus.FAILED,
+                failure_code=failure_code,
+                usage_certainty=response.usage_certainty,
+                usage=response.usage,
+            )
+
+    @staticmethod
+    def _accumulate_usage(
+        accumulator: VerificationExecutionAccumulator,
+        usage: RuntimeResourceAmount,
+        certainty: UsageCertainty,
+        hard_limits: RuntimeResourceAmount,
+        role: VerificationRole,
+    ) -> None:
+        accumulator.usage = accumulator.usage.plus(usage)
+        if certainty is UsageCertainty.UNKNOWN:
             accumulator.certainty = UsageCertainty.UNKNOWN
         elif (
-            response.usage_certainty is UsageCertainty.UPPER_BOUND
+            certainty is UsageCertainty.UPPER_BOUND
             and accumulator.certainty is UsageCertainty.EXACT
         ):
             accumulator.certainty = UsageCertainty.UPPER_BOUND
         if not accumulator.usage.fits_within(hard_limits):
             raise VerificationContractError("verification hard limits exceeded")
-        if (
-            response.usage_certainty is UsageCertainty.UNKNOWN
-            and request.role is not VerificationRole.JUDGE
-        ):
+        if certainty is UsageCertainty.UNKNOWN and role is not VerificationRole.JUDGE:
             raise VerificationUsageUncertain(
                 "unknown usage stops further verification model calls"
             )
-        try:
-            payload = json.loads(response.raw_bytes)
-            return response_type.model_validate(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
-            raise VerificationModelFailure(
-                "verification model response is malformed"
-            ) from exc
 
     @staticmethod
     def _notify(

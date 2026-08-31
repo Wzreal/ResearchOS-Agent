@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Protocol
 
 from researchos.domain.contracts import RunState, TraceEvent
+from researchos.domain.observability import AppendOnceResult
+from researchos.domain.runtime import TraceEventDescriptor
 
 
 class RunStore(Protocol):
@@ -22,6 +24,8 @@ class Clock(Protocol):
 
 class TraceSink(Protocol):
     def append(self, event: TraceEvent) -> None: ...
+
+    def append_once(self, descriptor: TraceEventDescriptor) -> AppendOnceResult: ...
 
     def read(
         self, run_id: str, *, recover_torn_tail: bool = False
