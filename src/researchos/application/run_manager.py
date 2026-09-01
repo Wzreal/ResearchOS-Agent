@@ -10,6 +10,7 @@ from uuid import uuid4
 from researchos.application.errors import (
     CorruptRunState,
     InvalidTransition,
+    RealRunBindingError,
     RunConfigurationError,
     TerminalRunCannotResume,
     TraceCommitError,
@@ -27,13 +28,44 @@ from researchos.domain.contracts import (
     TraceEventType,
     model_sha256,
 )
-from researchos.interfaces.lifecycle import Clock, RunStore, TraceSink
+from researchos.interfaces.lifecycle import (
+    Clock,
+    RunIntegrationGuard,
+    RunStore,
+    TraceSink,
+)
 from researchos.security.redaction import (
     PersistenceRedactor,
     prepare_persistent_run_input,
 )
 
 IdFactory = Callable[[str], str]
+
+
+class _RejectingRealIntegrationGuard:
+    def validate_create(self, config: RunConfig) -> None:
+        if config.mode.value == "real":
+            raise RunConfigurationError(
+                "real mode has no configured real adapters in Phase 1"
+            )
+
+    def bind_created(self, state: RunState) -> None:
+        del state
+
+    def validate_resume(self, state: RunState) -> None:
+        if state.config.mode.value == "real":
+            raise RunConfigurationError(
+                "real mode has no configured real adapters in Phase 1"
+            )
+
+    def validate_bound_state(self, state: RunState) -> None:
+        if state.config.mode.value == "real":
+            raise RunConfigurationError(
+                "real mode has no configured real adapters in Phase 1"
+            )
+
+    def validate_transition(self, state: RunState, target: RunStatus) -> None:
+        del state, target
 
 LEGAL_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.CREATED: frozenset(
@@ -91,12 +123,14 @@ class RunManager:
         trace_sink: TraceSink,
         id_factory: IdFactory | None = None,
         redactor: PersistenceRedactor | None = None,
+        integration_guard: RunIntegrationGuard | None = None,
     ) -> None:
         self._store = store
         self._clock = clock
         self._trace = trace_sink
         self._id_factory = id_factory or _default_id_factory
         self._redactor = redactor or PersistenceRedactor()
+        self._integration_guard = integration_guard or _RejectingRealIntegrationGuard()
 
     def create(self, run_input: RunInput, config: RunConfig) -> RunState:
         now = self._clock.now()
@@ -134,6 +168,15 @@ class RunManager:
             next_status=RunStatus.CREATED,
             causation_id=intent.event_id,
         )
+        try:
+            self._integration_guard.bind_created(state)
+        except RealRunBindingError:
+            raise
+        except Exception as exc:
+            raise RealRunBindingError(
+                "REAL Run was created but integration binding failed",
+                run_id=state.run_id,
+            ) from exc
         return state
 
     def load(self, run_id: str) -> RunState:
@@ -146,6 +189,7 @@ class RunManager:
             raise InvalidTransition("terminal states must be entered through finalize")
         current = self._load_for_mutation(run_id)
         self._require_transition(current.status, next_status)
+        self._integration_guard.validate_transition(current, next_status)
         return self._commit_state_change(current, next_status=next_status)
 
     def finalize(
@@ -194,6 +238,7 @@ class RunManager:
         if state.status in TERMINAL_STATUSES:
             raise TerminalRunCannotResume(f"run is already {state.status.value}")
         self._reconcile(state)
+        self._integration_guard.validate_resume(state)
         resumed = TraceEvent(
             event_id=self._new_id("evt"),
             event_type=TraceEventType.RESUMED,
@@ -210,6 +255,8 @@ class RunManager:
     def _load_for_mutation(self, run_id: str) -> RunState:
         state = self._store.load(run_id)
         self._reconcile(state)
+        if state.config.mode.value == "real":
+            self._integration_guard.validate_bound_state(state)
         return state
 
     def _commit_state_change(
@@ -398,12 +445,8 @@ class RunManager:
     def _hash_model(model: RunInput | RunConfig) -> str:
         return model_sha256(model)
 
-    @staticmethod
-    def _validate_config(config: RunConfig, *, now: datetime) -> None:
-        if config.mode.value == "real":
-            raise RunConfigurationError(
-                "real mode has no configured real adapters in Phase 1"
-            )
+    def _validate_config(self, config: RunConfig, *, now: datetime) -> None:
+        self._integration_guard.validate_create(config)
         if config.deadline is not None and config.deadline <= now:
             raise RunConfigurationError("deadline must be later than the current time")
 

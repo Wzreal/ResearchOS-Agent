@@ -343,6 +343,28 @@ never block the asyncio business loop.
 8. Evaluation reads frozen artifacts and publishes a standalone EvaluationRun;
    it never finalizes or otherwise mutates the evaluated Run.
 
+## Phase 9A real integration boundary
+
+REAL LLM composition is an additive authority outside `RunState`. Its nested,
+non-circular hashes freeze effective provider behavior without persisting
+credentials. A shared in-process path lock provides immutable first-writer
+filesystem creation across adapter instances. Every REAL Run mutation validates
+that authority through `RunManager._load_for_mutation`; entering PLANNING also
+requires process-local adapter binding.
+
+DeepSeek is implemented behind the existing PlanningModel, Agent, and
+VerificationModel ports through a bounded raw HTTPX transport with no retry or
+REAL-to-MOCK fallback. Phase 8 durable DISPATCHED continues to dominate
+verification transport diagnostics. Later Phase 9 provider capabilities remain
+outside this boundary. A read-only dispatch authorizer enforces role-specific
+Run status at adapter construction and immediately before each call. The call
+check also reloads and validates durable composition, recomputes current
+semantics, and matches the local binding before HTTP. DeepSeek is HTTPS-only;
+its explicit thinking/reasoning policy and per-model pricing upper bounds are
+composition-frozen, and local monetary usage is `UPPER_BOUND`. Phase 9A fails
+closed for non-empty REAL capability sets until Phase 9B binds exact per-Run
+Tool schemas.
+
 Phase 6 freezes the Phase 5 Claim Graph and Evidence Store once per invocation.
 It admits only whole Claim/Evidence items, derives structural support from the
 single fail-closed current-valid-edge helper, and runs a provider-independent Synthesizer followed by

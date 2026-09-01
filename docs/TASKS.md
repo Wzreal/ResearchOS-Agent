@@ -157,7 +157,22 @@ not aspiration.
 
 ## Phase 9 — Real integrations and production readiness
 
-- TODO — Integrate selected real LLM provider through its adapter.
+- DONE — Implement Phase 9A immutable REAL composition, central Run mutation
+  guard, process-local binding, bounded OpenAI-compatible transport, and
+  DeepSeek Planning/Agent/Verification adapters with deterministic offline
+  tests.
+- DONE — Add Phase 9A optional dependency isolation, core/all-extras CI split,
+  non-persistent environment/secret settings, and zero-cost/read-only doctor
+  basics.
+- DONE — Harden the DeepSeek V4 request profile, per-model pricing upper
+  bounds and usage certainty, dispatch-time composition revalidation,
+  retryability preservation, generic secret validation, and client close.
+- DONE — Fail closed on non-stop provider completions, freeze adapter-owned
+  pricing safety profiles, and enforce provider-call reservation compatibility
+  at existing Run and Agent budget boundaries.
+- DONE — Correct DeepSeek V4 reservation safety data to the reviewed 1M context,
+  pin the 384K output maximum and USD billing currency, and reject currency or
+  model-limit drift before dispatch.
 - TODO — Integrate selected browser/search and retrieval providers.
 - TODO — Integrate optional observability backend.
 - TODO — Complete security, migration, end-to-end, and release gates.

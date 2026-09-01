@@ -864,3 +864,86 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   own semantic event rather than remote-delivery-drop terminology. Durable
   remote delivery, exporter retry, cross-process leases, real integrations, and
   resolution of unknown provider outcomes remain Phase 9 work.
+
+## ADR-0025: Freeze REAL provider composition before lifecycle mutation
+
+- **Status:** Accepted
+- **Date:** 2026-08-31
+- **Context:** Phase 9A introduces real LLM calls. Resume and mutation cannot
+  safely reuse a Run if provider request semantics, byte/deadline bounds,
+  pricing rules, prompts, endpoints, or adapters changed. Credentials must
+  remain rotatable and outside durable artifacts. Atomic replace alone also
+  cannot provide immutable first-writer behavior between adapter instances.
+- **Decision:** Persist `outputs/<run_id>/real_composition.json` as a bounded
+  `RealCompositionEnvelope`. Its one-time `recorded_at` is occurrence metadata;
+  identity is the non-circular chain `ModelCallPolicySnapshot ->`
+  `ModelBundlePayload -> SemanticCompositionPayload -> composition_hash ->`
+  `composition_id`. Every load independently recomputes nested hashes, the
+  composition ID, and the envelope content hash. Provider/profile/model,
+  canonical base endpoint including path, prompt/response contracts,
+  generation controls, request/response limits, four transport timeouts,
+  currency, cost ceiling, and versioned per-model pricing upper-bound rules are
+  resume-frozen. An adapter-owned, model-specific pricing safety profile pins
+  conservative rate floors, USD billing currency, a 1,000,000-token context
+  window, and a 384,000-token provider output maximum. Without a proven local
+  tokenizer, the full context window supplies the input reservation;
+  `max_input_tokens` remains post-response integrity only. Its version/hash and
+  the derived provider-call token/cost reservation are part of policy, bundle,
+  and composition identity. Operator rates may be raised but cannot undercut
+  those floors; non-USD currency and unknown models fail closed. The profile is
+  reviewed versioned safety data, not a permanent provider-price guarantee.
+  Credential values are excluded, but required presence is revalidated. The
+  safe credential-slot ID is resume-frozen inside each model bundle.
+
+  Filesystem create uses a process-wide normalized-path lock shared across
+  adapter instances. Existence reload, validation, semantic comparison, and
+  first write occur inside that lock; equal semantics return the original
+  envelope, while different semantics conflict without overwrite. Atomic
+  replace supplies crash-safe publication, not CAS by itself.
+
+  `RunManager` keeps its existing default REAL rejection. An explicitly
+  injected `RunIntegrationGuard` validates REAL create/resume and
+  `_load_for_mutation()` validates the authority after lifecycle trace
+  reconciliation for every transition/finalize path. `CREATED -> PLANNING`
+  additionally requires a process-local binding. Real adapters can be built
+  only through that binding. A read-only dispatch authorizer checks
+  role-specific Run status at construction and immediately before each call.
+  The immediate pre-dispatch check also reloads and validates the durable
+  composition authority, recomputes current semantic composition, and matches
+  the process-local binding hash. Read-only `load()` remains read-only.
+
+  DeepSeek implements the existing PlanningModel, Agent, and VerificationModel
+  ports through one raw HTTPX OpenAI-compatible transport. Calls are bounded,
+  non-streaming, structured JSON, explicit identity, and have no retry or
+  fallback. DeepSeek is HTTPS-only; child tasks are cancelled and joined on
+  parent cancellation; raw provider exceptions do not cross the stable error
+  boundary. Phase 9A explicitly sends versioned thinking mode and reasoning
+  effort. Thinking-enabled roles canonically omit ignored temperature/top-p;
+  thinking-disabled roles require them. Only `finish_reason=stop` is success;
+  all other reasons fail with stable response-received codes and preserve any
+  validated usage without adapter retry. Provider token counts must fit explicit
+  frozen input/output caps. `max_input_tokens` is post-response integrity only;
+  neither HTTP bytes nor local tokenization establish admission. A separate
+  adapter-owned provider/model upper bound supplies pre-dispatch token/cost
+  reservation, which must fit the Run budget and Agent task hard limit through
+  existing owners and never creates a second ledger. Local cost charges all
+  input tokens at a pinned
+  per-model maximum rate, is always `UPPER_BOUND`, and never uses HTTP bytes as
+  tokenizer truth or labels locally inferred billing `EXACT`. Phase 8
+  still marks any provider exception after its durable
+  DISPATCHED record as `INTERRUPTED_UNKNOWN`; Phase 9 does not reinterpret it.
+
+  DeepSeek-specific safety policy remains in the Phase 9 domain for 9A and may
+  later become a generic provider pin. Composition pins requested model aliases,
+  not immutable physical weights. Provider `system_fingerprint` is deferred as
+  safe E2E/evaluation provenance and is not recovery authority.
+  Official-host allowlisting remains deferred to Phase 9D security hardening.
+
+  Phase 9A fails closed when REAL capabilities are non-empty and exposes no
+  generic Tool union to its Agent model. Exact capability schema binding is a
+  Phase 9B prerequisite; Phase 4 AgentRunner remains final authorization owner.
+- **Consequences:** An existing REAL Run fails closed on missing, tampered, or
+  changed composition while credential rotation remains possible. Current
+  first-writer guarantees are in-process; deployment permits one writer
+  process per Run. Tavily, Browser, embeddings, Milvus, Langfuse, automatic
+  Claim Extraction, workflow sequencing, and real E2E remain Phase 9B-9E.
