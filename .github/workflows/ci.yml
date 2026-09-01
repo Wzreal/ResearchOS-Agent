@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,5 +14,20 @@ jobs:
         with:
           python-version: "3.11"
       - run: uv sync
+      - run: uv run python -c "import researchos"
+      - run: uv run pytest --basetemp=.pytest_tmp -p no:cacheprovider -m "not requires_real_extra"
+      - run: uv run ruff check .
+      - run: git diff --check
+
+  all-extras-offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --all-extras
       - run: uv run pytest --basetemp=.pytest_tmp -p no:cacheprovider
       - run: uv run ruff check .
+      - run: git diff --check

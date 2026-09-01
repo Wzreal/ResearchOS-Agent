@@ -1,0 +1,125 @@
+"""Zero-cost, read-only Phase 9A REAL configuration diagnostics."""
+
+from __future__ import annotations
+
+import json
+from enum import StrEnum
+from typing import Literal
+
+from pydantic import Field
+
+from researchos.application.errors import RunConfigurationError
+from researchos.application.real_composition import RealCompositionManager
+from researchos.configuration.real_settings import RealIntegrationSettings
+from researchos.domain.contracts import ContractModel, RunState, SafeId
+from researchos.interfaces.providers import SecretSource
+
+
+class DoctorCheckStatus(StrEnum):
+    PASS = "pass"
+    PARTIALLY_VERIFIED = "partially_verified"
+    FAIL = "fail"
+
+
+class DoctorCheck(ContractModel):
+    check_id: SafeId
+    status: DoctorCheckStatus
+    code: SafeId
+
+
+class DoctorReport(ContractModel):
+    schema_version: Literal[1] = 1
+    mode: Literal["real"] = "real"
+    paid_calls: int = Field(default=0, ge=0)
+    remote_writes: int = Field(default=0, ge=0)
+    checks: tuple[DoctorCheck, ...]
+
+
+class RealDoctor:
+    def __init__(
+        self,
+        *,
+        settings: RealIntegrationSettings,
+        secrets: SecretSource,
+        composition: RealCompositionManager | None = None,
+    ) -> None:
+        self._settings = settings
+        self._secrets = secrets
+        self._composition = composition
+
+    def run(
+        self,
+        *,
+        state: RunState | None = None,
+        probe_paid: bool = False,
+        probe_writes: bool = False,
+    ) -> DoctorReport:
+        if probe_paid or probe_writes:
+            raise RunConfigurationError(
+                "paid/write doctor probes are not implemented in Phase 9A"
+            )
+        checks: list[DoctorCheck] = [
+            DoctorCheck(
+                check_id="configuration",
+                status=DoctorCheckStatus.PASS,
+                code="configuration_valid",
+            )
+        ]
+        secret_ids = tuple(
+            sorted({item.credential_slot_id for item in self._settings.models})
+        )
+        secrets = tuple(self._secrets.get_secret(secret_id) for secret_id in secret_ids)
+        secrets_valid = all(
+            isinstance(value, str) and bool(value.strip()) for value in secrets
+        )
+        checks.append(
+            DoctorCheck(
+                check_id="secret_presence",
+                status=(
+                    DoctorCheckStatus.PASS
+                    if secrets_valid
+                    else DoctorCheckStatus.FAIL
+                ),
+                code=(
+                    "secrets_present"
+                    if secrets_valid
+                    else "secret_missing"
+                ),
+            )
+        )
+        if state is not None and self._composition is not None:
+            try:
+                self._composition.validate_bound_state(state)
+            except Exception:
+                checks.append(
+                    DoctorCheck(
+                        check_id="composition",
+                        status=DoctorCheckStatus.FAIL,
+                        code="composition_invalid",
+                    )
+                )
+            else:
+                checks.append(
+                    DoctorCheck(
+                        check_id="composition",
+                        status=DoctorCheckStatus.PASS,
+                        code="composition_valid",
+                    )
+                )
+        checks.append(
+            DoctorCheck(
+                check_id="provider_availability",
+                status=DoctorCheckStatus.PARTIALLY_VERIFIED,
+                code="paid_probe_not_run",
+            )
+        )
+        report = DoctorReport(checks=tuple(checks))
+        encoded = json.dumps(
+            report.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+        if any(
+            isinstance(value, str) and value and value in encoded
+            for value in secrets
+        ):
+            raise ValueError("doctor report contains a credential canary")
+        return report

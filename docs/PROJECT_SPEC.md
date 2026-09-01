@@ -108,6 +108,7 @@ outputs/<run_id>/
 ├── manifest.json
 ├── report.md
 ├── run_state.json
+├── real_composition.json
 ├── checkpoint.json
 ├── verification_operations/
 │   └── <verification_id>.json
@@ -122,6 +123,9 @@ outputs/<run_id>/
 - `manifest.json` records schema versions, creation/completion times, mode,
   sanitized configuration, input hash, and artifact hashes.
 - `run_state.json` is a recoverable state snapshot written atomically.
+- `real_composition.json` is the Phase 9 immutable, non-secret REAL provider
+  composition authority. It is absent for MOCK Runs and independently pins
+  model-call policy, model bundle, endpoint path, prompt, and pricing identity.
 - `checkpoint.json` is the Phase 3 atomic DAG-runtime snapshot. It stores the
   validated DAG/policy hashes, attempts, outcomes, budget/replan state, and the
   immutable last-mutation trace outbox used for bounded reconciliation.

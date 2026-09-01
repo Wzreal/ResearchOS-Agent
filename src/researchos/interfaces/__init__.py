@@ -1,12 +1,23 @@
 """Domain-facing interfaces."""
 
 from researchos.interfaces.agent import Agent
-from researchos.interfaces.lifecycle import Clock, RunStore, TraceSink
+from researchos.interfaces.lifecycle import (
+    Clock,
+    RealCompositionStore,
+    RunIntegrationGuard,
+    RunStore,
+    TraceSink,
+)
 from researchos.interfaces.planning import (
     Planner,
     PlanningModel,
     TrustedReplanLineageRestorer,
     TrustedRuntimeReplanner,
+)
+from researchos.interfaces.providers import (
+    ProviderDispatchAuthorizer,
+    ProviderDispatchDiagnostic,
+    SecretSource,
 )
 from researchos.interfaces.runtime import (
     AsyncSleeper,
@@ -26,8 +37,13 @@ __all__ = [
     "Clock",
     "Planner",
     "PlanningModel",
+    "ProviderDispatchAuthorizer",
+    "ProviderDispatchDiagnostic",
+    "RealCompositionStore",
+    "RunIntegrationGuard",
     "RunCancellationController",
     "RunStore",
+    "SecretSource",
     "TaskExecutionBackend",
     "TraceSink",
     "Tool",

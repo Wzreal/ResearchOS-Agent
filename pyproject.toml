@@ -12,6 +12,32 @@ dependencies = [
     "pydantic>=2.0,<3.0",
 ]
 
+[project.scripts]
+researchos = "researchos.cli:main"
+
+[project.optional-dependencies]
+llm = ["httpx>=0.28.1,<1.0"]
+search = ["httpx>=0.28.1,<1.0"]
+browser = [
+    "httpx>=0.28.1,<1.0",
+    "trafilatura>=2.2,<3.0",
+]
+retrieval = [
+    "httpx>=0.28.1,<1.0",
+    "pymilvus==2.6.14",
+]
+observability = [
+    "httpx>=0.28.1,<1.0",
+    "opentelemetry-proto>=1.36,<2.0",
+]
+browser-js = ["playwright>=1.55,<2.0"]
+real = [
+    "httpx>=0.28.1,<1.0",
+    "trafilatura>=2.2,<3.0",
+    "pymilvus==2.6.14",
+    "opentelemetry-proto>=1.36,<2.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0,<9.0",
@@ -24,6 +50,9 @@ packages = ["src/researchos"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+markers = [
+    "requires_real_extra: test instantiates an optional third-party REAL adapter",
+]
 
 [tool.ruff]
 target-version = "py311"

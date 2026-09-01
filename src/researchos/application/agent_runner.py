@@ -212,6 +212,13 @@ class AgentRunner:
                 )
             usage.add(decision.usage, decision.usage_certainty)
             if usage.certainty is UsageCertainty.UNKNOWN:
+                if decision.kind is AgentDecisionKind.FAILED:
+                    return self._failure(
+                        decision.error.code,
+                        decision.error.message,
+                        usage,
+                        retryable=decision.error.retryable,
+                    )
                 return self._failure(
                     "agent_usage_unknown",
                     "agent usage could not be determined",

@@ -1,5 +1,14 @@
 """Explicit Phase 1 application and persistence failures."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
+
+if TYPE_CHECKING:
+    from researchos.interfaces.providers import ProviderDispatchDiagnostic
+
 
 class ResearchOSError(Exception):
     """Base class for expected ResearchOS failures."""
@@ -31,6 +40,68 @@ class IncompatibleSchema(ResearchOSError):
 
 class RunConfigurationError(ResearchOSError):
     pass
+
+
+class RealCompositionNotFound(ResearchOSError):
+    pass
+
+
+class RealCompositionConflict(ResearchOSError):
+    pass
+
+
+class RealCompositionCorruption(ResearchOSError):
+    pass
+
+
+class RealCompositionPersistenceError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, authority_replaced: bool) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.authority_replaced = authority_replaced
+
+
+class MissingOptionalDependency(ResearchOSError):
+    def __init__(self, extra: str) -> None:
+        super().__init__(f"optional dependency group is required: {extra}")
+        self.extra = extra
+
+
+class RealProviderFailure(ResearchOSError):
+    def __init__(
+        self,
+        code: str,
+        *,
+        diagnostic: ProviderDispatchDiagnostic,
+        retryable: bool = False,
+        http_status: int | None = None,
+        usage: RuntimeResourceAmount | None = None,
+        usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        from researchos.interfaces.providers import ProviderDispatchDiagnostic
+
+        self.diagnostic = ProviderDispatchDiagnostic(diagnostic)
+        self.retryable = retryable
+        self.http_status = http_status
+        if usage is None and usage_certainty is not UsageCertainty.UNKNOWN:
+            raise ValueError("known usage certainty requires provider usage")
+        self.usage = usage
+        self.usage_certainty = usage_certainty
+
+    @property
+    def dispatched(self) -> bool:
+        from researchos.interfaces.providers import ProviderDispatchDiagnostic
+
+        return self.diagnostic is not ProviderDispatchDiagnostic.NOT_DISPATCHED
+
+
+class RealRunBindingError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.run_state_committed = True
 
 
 class TerminalRunCannotResume(ResearchOSError):
@@ -71,10 +142,22 @@ class PlanningPreconditionError(ResearchOSError):
 class PlanningModelFailure(ResearchOSError):
     """Stable provider-independent model boundary failure."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        usage: RuntimeResourceAmount | None = None,
+        usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        if usage is None and usage_certainty is not UsageCertainty.UNKNOWN:
+            raise ValueError("known usage certainty requires planning usage")
+        self.usage = usage
+        self.usage_certainty = usage_certainty
 
 
 class CheckpointNotFound(ResearchOSError):

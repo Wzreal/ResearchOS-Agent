@@ -1,15 +1,13 @@
 # ResearchOS Agent
 
-ResearchOS Agent is a planned recoverable, verifiable multi-agent system for
+ResearchOS Agent is a recoverable, verifiable multi-agent system for
 complex, long-running deep-research tasks.
 
-The project has completed **Phase 3**. It now includes provider-independent
-planning plus a durable asynchronous DAG runtime with deterministic scheduling,
-retry/timeout/cancellation policy, task failure isolation, atomic checkpoints,
-crash reconciliation, two-level idempotency keys, additive budget accounting,
-and durable bounded replan requests. Agents, tools, real providers, retrieval,
-evidence memory, verification roles, and evaluation execution are not
-implemented.
+The project has completed Phases 0-8 and Phase 9A. It includes durable planning
+and DAG execution, Agent/Tool adapters, Evidence and Claim authorities, bounded
+verification, evaluation, resilience hardening, and an immutable REAL provider
+composition boundary with DeepSeek Planning/Agent/Verification adapters.
+Phase 9B-9E integrations and real E2E measurements remain pending.
 
 ## Technical direction
 
@@ -45,11 +43,11 @@ import researchos
 print(researchos.__version__)
 ```
 
-The implemented phases support lifecycle, planning, and DAG runtime tests in
-explicit mock mode. The Phase 3 execution backend is a narrow
-capability-neutral port with an exact-fixture offline mock; it is not an Agent
-or Tool implementation. Real mode still fails before persistence because Phase
-4 real adapters do not exist, and it never falls back to mock.
+Mock mode remains explicit and deterministic. REAL mode requires an injected
+Phase 9A integration guard, immutable `real_composition.json`, process-local
+adapter binding, and credentials supplied outside durable artifacts. The
+default `RunManager` still rejects unconfigured REAL mode and never falls back
+to MOCK.
 
 ## Repository layout
 
