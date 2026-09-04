@@ -35,6 +35,7 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
+from researchos.domain.real_composition import ProviderSuboperationReservation
 from researchos.domain.real_tools import (
     AuthorizedToolDispatchEnvelope,
     CapabilityDispatchContext,
@@ -54,8 +55,6 @@ from researchos.interfaces.agent import Agent
 from researchos.interfaces.lifecycle import Clock, TraceSink
 from researchos.interfaces.providers import (
     ProviderAdmissionProfile,
-    ProviderAdmissionProfiledAgent,
-    ProviderReservedAgent,
     ProviderReservedTool,
 )
 from researchos.interfaces.runtime import AsyncSleeper, CancellationSignal
@@ -183,24 +182,31 @@ class AgentRunner:
             precondition = self._precondition_failure(context, cancellation, usage)
             if precondition is not None:
                 return precondition
-            if isinstance(self._agent, ProviderReservedAgent):
+            if self._agent.descriptor.mode is AdapterMode.REAL:
                 profile = self._agent_admission_profile()
+                if profile is None:
+                    return self._failure(
+                        "provider_admission_profile_invalid",
+                        "REAL Agent has an invalid provider admission profile",
+                        usage,
+                    )
                 if profile is ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1:
+                    reservation = self._agent_provider_reservation()
+                    if reservation is None:
+                        return self._failure(
+                            "provider_reservation_contract_invalid",
+                            "REAL Agent does not expose provider reservation authority",
+                            usage,
+                        )
                     admission = self._reservation_failure(
                         "agent",
-                        self._agent.provider_call_reservation,
+                        reservation,
                         usage,
                         context.hard_limits,
                         effective_tool_limit,
                     )
                     if admission is not None:
                         return admission
-            elif self._agent.descriptor.mode is AdapterMode.REAL:
-                return self._failure(
-                    "provider_reservation_contract_invalid",
-                    "REAL Agent does not expose provider reservation authority",
-                    usage,
-                )
             request = AgentRequest(
                 request_id=self._id_factory("areq"),
                 context=context,
@@ -812,10 +818,34 @@ class AgentRunner:
             )
         return None
 
-    def _agent_admission_profile(self) -> ProviderAdmissionProfile:
-        if isinstance(self._agent, ProviderAdmissionProfiledAgent):
-            return self._agent.provider_admission_profile
-        return ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
+    def _agent_admission_profile(self) -> ProviderAdmissionProfile | None:
+        """Read profile without runtime Protocol property probes.
+
+        Phase 9A direct agents intentionally retain legacy task-limit admission
+        and may not have a Phase 9B suboperation reservation available.
+        """
+
+        try:
+            profile = getattr(self._agent, "provider_admission_profile", None)
+        except Exception:
+            return None
+        if profile is None:
+            return ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
+        try:
+            return ProviderAdmissionProfile(profile)
+        except (TypeError, ValueError):
+            return None
+
+    def _agent_provider_reservation(self) -> ProviderSuboperationReservation | None:
+        """Read reservation authority only for accumulated REAL admission."""
+
+        try:
+            reservation = self._agent.provider_call_reservation
+        except Exception:
+            return None
+        if not isinstance(reservation, ProviderSuboperationReservation):
+            return None
+        return reservation
 
     @staticmethod
     def _over_limit(

@@ -44,6 +44,7 @@ from researchos.domain.tools import (
     ToolSideEffect,
     ToolUsage,
 )
+from researchos.interfaces.providers import ProviderAdmissionProfile
 from researchos.interfaces.web import BoundedHttpResponse
 
 
@@ -107,6 +108,18 @@ class ReservedAgent:
         del request, cancellation
         self.calls += 1
         return self.decisions.pop(0)
+
+
+class LegacyDirectAgent(ReservedAgent):
+    """A Phase 9A binding with no Phase 9B suboperation timeout."""
+
+    @property
+    def provider_admission_profile(self):
+        return ProviderAdmissionProfile.LEGACY_TASK_LIMIT_V1
+
+    @property
+    def provider_call_reservation(self):
+        raise AssertionError("legacy profile must not read provider reservation")
 
 
 class ReservedTool:
@@ -255,6 +268,13 @@ def test_second_agent_call_is_denied_when_reservation_no_longer_fits() -> None:
     assert result.error.code == "agent_provider_reservation_exceeds_remaining_cost"
     assert agent.calls == 1
     assert len(tool.calls) == 1
+
+
+def test_legacy_direct_agent_skips_phase9b_reservation_property() -> None:
+    agent = LegacyDirectAgent([_final_decision()])
+    result = _run(agent, ReservedTool(), _context())
+    assert result.status.value == "succeeded"
+    assert agent.calls == 1
 
 
 def test_tool_reservation_denial_makes_zero_tool_calls() -> None:
