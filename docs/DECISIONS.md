@@ -1018,21 +1018,24 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   Cross-process Tool dedupe, JavaScript browsing, retrieval providers, real E2E,
   and broader network sandboxing remain later Phase 9 work.
 
-## ADR-0027: Restrict REAL retrieval to the Zilliz Cloud Free BM25 profile
+## ADR-0027: Restrict REAL retrieval to an attested Zilliz Cloud Free-plan BM25 profile
 
 - **Status:** Accepted
 - **Date:** 2026-09-04
 - **Decision:** Phase 9C supports one read-only `managed_retrieval` capability:
-  the Zilliz Cloud Free serverless serving-endpoint profile with Milvus built-in
+  an operator-attested Zilliz Cloud Free-plan serving-endpoint profile with Milvus built-in
   BM25. Its canonical endpoint is HTTPS, no explicit port, and exactly
   `<cluster>.serverless.<region>.vectordb.zillizcloud.com`; authorization and
   composition validation precede endpoint validation, which precedes secret
   lookup and the sole search RPC. Private/global/on-demand/Dedicated/arbitrary
-  Milvus endpoints fail closed.
+  Milvus endpoints fail closed. The endpoint family is shared by Free and paid
+  Serverless deployments and therefore never proves a Free plan. Zero-cost
+  admission requires a frozen operator-provisioned Free-plan attestation; that
+  attestation participates in the retrieval policy and REAL composition hash.
 
-  Free queries have a fixed zero monetary upper bound, so the immutable
-  reservation is zero USD cost, one Tool call and the policy total timeout.
-  Variable billed profiles cannot prove a per-call upper bound and are not
+  Only an attested Free plan has a fixed zero monetary upper bound, so its
+  immutable reservation is zero USD cost, one Tool call and the policy total
+  timeout. Variable billed profiles cannot prove a per-call upper bound and are not
   supported. This is admission metadata only; Phase 3 remains the budget and
   retry owner. The frozen collection contract includes `document_id`,
   `chunk_id`, `locator`, `content`, stored `content_hash`, and bounded safe

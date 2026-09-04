@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+from collections.abc import Callable
 from contextlib import suppress
 from time import monotonic
 from typing import Any
@@ -17,7 +18,7 @@ from researchos.application.real_composition import (
 )
 from researchos.application.real_tool_dispatch import RealToolDispatchAuthorizer
 from researchos.domain.real_tools import AuthorizedToolDispatchEnvelope
-from researchos.domain.retrieval import canonicalize_zilliz_free_endpoint
+from researchos.domain.retrieval import canonicalize_zilliz_free_or_serverless_endpoint
 from researchos.domain.runtime import UsageCertainty
 from researchos.domain.tools import (
     LocalRetrievalHit,
@@ -34,27 +35,40 @@ from researchos.interfaces.runtime import CancellationSignal
 
 
 class PymilvusZillizBm25Transport:
+    def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
+        self._client_factory = client_factory
+
     def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+        client_factory = self._client_factory
+        if client_factory is None:
+            try:
+                from pymilvus import MilvusClient
+            except ImportError as exc:  # pragma: no cover - dependency boundary
+                raise MissingOptionalDependency("retrieval") from exc
+            client_factory = MilvusClient
+        client = client_factory(uri=kwargs["endpoint"], token=kwargs["credential"])
         try:
-            from pymilvus import MilvusClient
-        except ImportError as exc:  # pragma: no cover - dependency boundary
-            raise MissingOptionalDependency("retrieval") from exc
-        client = MilvusClient(uri=kwargs["endpoint"], token=kwargs["credential"])
-        response = client.search(
-            collection_name=kwargs["collection_id"],
-            data=[kwargs["query"]],
-            anns_field=kwargs["anns_field"],
-            limit=kwargs["limit"],
-            output_fields=list(kwargs["output_fields"]),
-            timeout=kwargs["timeout_seconds"],
-        )
-        if (
-            not isinstance(response, list)
-            or len(response) != 1
-            or not isinstance(response[0], list)
-        ):
-            raise ValueError("invalid Zilliz search response")
-        return response[0]
+            response = client.search(
+                collection_name=kwargs["collection_id"],
+                data=[kwargs["query"]],
+                anns_field=kwargs["anns_field"],
+                limit=kwargs["limit"],
+                output_fields=list(kwargs["output_fields"]),
+                timeout=kwargs["timeout_seconds"],
+            )
+            if (
+                not isinstance(response, list)
+                or len(response) != 1
+                or not isinstance(response[0], list)
+            ):
+                raise ValueError("invalid Zilliz search response")
+            return response[0]
+        finally:
+            # A timed-out/cancelled asyncio waiter cannot kill a synchronous
+            # RPC thread. The frozen RPC timeout bounds it; this finally closes
+            # the client once that thread returns on every terminal path.
+            with suppress(Exception):
+                client.close()
 
 
 class ZillizBm25RetrievalTool:
@@ -115,7 +129,7 @@ class ZillizBm25RetrievalTool:
             )
         try:
             self._authorizer.authorize(envelope)
-            endpoint = canonicalize_zilliz_free_endpoint(policy.endpoint)
+            endpoint = canonicalize_zilliz_free_or_serverless_endpoint(policy.endpoint)
         except Exception:
             return self._failure(
                 "real_tool_dispatch_unauthorized", started, UsageCertainty.EXACT
@@ -160,40 +174,50 @@ class ZillizBm25RetrievalTool:
                 )
             )
         )
-        done, _ = await asyncio.wait(
-            {worker, cancelled, timeout}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if worker not in done:
-            worker.cancel()
-            for task in (cancelled, timeout):
-                task.cancel()
-            if cancelled in done:
+        try:
+            done, _ = await asyncio.wait(
+                {worker, cancelled, timeout}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if worker not in done:
+                worker.cancel()
+                if cancelled in done:
+                    return self._terminal(
+                        "retrieval_cancelled",
+                        started,
+                        ToolInvocationStatus.CANCELLED,
+                        UsageCertainty.UNKNOWN,
+                    )
                 return self._terminal(
-                    "retrieval_cancelled",
+                    "retrieval_timed_out",
                     started,
-                    ToolInvocationStatus.CANCELLED,
+                    ToolInvocationStatus.TIMED_OUT,
                     UsageCertainty.UNKNOWN,
                 )
+            try:
+                raw = worker.result()
+            except MissingOptionalDependency:
+                raise
+            except Exception:
+                return self._failure(
+                    "retrieval_provider_unavailable", started, UsageCertainty.UNKNOWN
+                )
+        except asyncio.CancelledError:
+            # Cancelling the asyncio task detaches only the waiter; the
+            # synchronous RPC remains bounded by policy and its transport
+            # finally closes the client once it finishes.
+            worker.cancel()
             return self._terminal(
-                "retrieval_timed_out",
+                "retrieval_cancelled",
                 started,
-                ToolInvocationStatus.TIMED_OUT,
+                ToolInvocationStatus.CANCELLED,
                 UsageCertainty.UNKNOWN,
             )
-        for task in (cancelled, timeout):
-            task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cancelled
-        with suppress(asyncio.CancelledError):
-            await timeout
-        try:
-            raw = worker.result()
-        except MissingOptionalDependency:
-            raise
-        except Exception:
-            return self._failure(
-                "retrieval_provider_unavailable", started, UsageCertainty.UNKNOWN
-            )
+        finally:
+            for task in (cancelled, timeout):
+                task.cancel()
+            for task in (cancelled, timeout):
+                with suppress(asyncio.CancelledError):
+                    await task
         try:
             hits = self._validate_hits(raw, policy, request.limit)
         except Exception:

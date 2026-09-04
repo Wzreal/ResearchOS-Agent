@@ -1,9 +1,9 @@
-# Phase 9C — Zilliz Cloud Free BM25 Retrieval
+# Phase 9C — Zilliz Cloud Free-plan BM25 Retrieval
 
 ## Scope
 
 Phase 9C adds exactly one read-only REAL capability, `managed_retrieval`, backed
-by the Zilliz Cloud **Free cluster** serving-endpoint profile and Milvus built-in
+by the Zilliz Cloud **Free-plan** serving-endpoint profile and Milvus built-in
 BM25. It queries an operator-provisioned collection and returns existing
 `LocalRetrievalResult` records for Phase 5 ingestion. It adds no ingestion,
 embedding, dense or hybrid search, reranker, second provider, observability,
@@ -23,7 +23,7 @@ REAL E2E, or Phase 9D/9E work.
 
 ## Frozen provider profile
 
-Only `zilliz_cloud_free_serverless_bm25_v1` is supported:
+Only `zilliz_cloud_free_plan_bm25_v1` is supported:
 
 - Endpoint is exactly the canonical no-port HTTPS serving form
   `https://<cluster-id>.serverless.<region>.vectordb.zillizcloud.com/`.
@@ -33,12 +33,12 @@ Only `zilliz_cloud_free_serverless_bm25_v1` is supported:
 - It requires a pinned Zilliz token credential slot. The adapter sequence is
   authorization/composition validation, endpoint validation, credential lookup,
   then client creation and one search RPC.
-- Free-cluster query cost has the proven fixed monetary upper bound `0 USD`.
-  The reservation therefore uses `cost_microunits=0`, `USD`, one Tool call and
-  the frozen total timeout. Quota exhaustion is a provider failure, not a cost
-  estimate. Serverless paid, on-demand and Dedicated profiles have variable
-  usage/resource charges without a per-call immutable upper bound and are
-  unsupported/fail closed. No second budget ledger is introduced.
+- The endpoint proves only the shared Free-or-Serverless endpoint family. An
+  immutable operator-provisioned `ZillizFreePlanAttestation`, frozen in the
+  policy/composition hash, is independently required before the `0 USD`
+  reservation may be created. Missing authority fails closed; paid Serverless
+  and Dedicated profiles are rejected rather than estimated. No second budget
+  ledger is introduced.
 - The collection is operator-provisioned and read-only to ResearchOS. One
   logical invocation issues exactly one BM25 search RPC; no describe/list/schema
   inspection RPC is permitted.

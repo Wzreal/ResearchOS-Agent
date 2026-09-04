@@ -1,4 +1,4 @@
-"""Frozen Phase 9C Zilliz Cloud Free BM25 retrieval policy."""
+"""Frozen Phase 9C Zilliz Cloud Free-plan BM25 retrieval policy."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from researchos.domain.identity import sha256_text, stable_hash
 from researchos.domain.real_composition import ProviderSuboperationReservation
 
 ZILLIZ_BM25_ADAPTER_VERSION = "zilliz-milvus-bm25-v1"
-ZILLIZ_FREE_HOST = re.compile(
+ZILLIZ_FREE_OR_SERVERLESS_HOST = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.serverless\.[a-z0-9-]+\.vectordb\.zillizcloud\.com$"
 )
 
 
-def canonicalize_zilliz_free_endpoint(value: str) -> str:
+def canonicalize_zilliz_free_or_serverless_endpoint(value: str) -> str:
     parsed = urlsplit(value)
     if (
         parsed.scheme.lower() != "https"
@@ -28,11 +28,49 @@ def canonicalize_zilliz_free_endpoint(value: str) -> str:
         or parsed.query
         or parsed.fragment
         or not parsed.hostname
-        or not ZILLIZ_FREE_HOST.fullmatch(parsed.hostname.lower())
+        or not ZILLIZ_FREE_OR_SERVERLESS_HOST.fullmatch(parsed.hostname.lower())
         or parsed.path not in {"", "/"}
     ):
-        raise ValueError("endpoint is not a Zilliz Cloud Free serving endpoint")
+        raise ValueError(
+            "endpoint is not a Zilliz Cloud Free-or-Serverless serving endpoint"
+        )
     return urlunsplit(("https", parsed.hostname.lower(), "/", "", ""))
+
+
+class ZillizFreePlanAttestation(ContractModel):
+    """Operator-provisioned immutable authority for zero-cost Free-plan use.
+
+    A serving hostname proves only the shared Free-or-Serverless endpoint
+    family.  The operator must provide this frozen attestation before the
+    policy can reserve zero cost; the adapter never derives plan from a URL or
+    asks the provider to discover it during a Tool invocation.
+    """
+
+    schema_version: Literal[1] = 1
+    attestation_version: Literal["operator_provisioned_zilliz_free_plan_v1"] = (
+        "operator_provisioned_zilliz_free_plan_v1"
+    )
+    deployment_plan: Literal["free"] = "free"
+    authority_id: SafeId
+    attestation_hash: Sha256
+
+    @model_validator(mode="after")
+    def identity_is_valid(self) -> ZillizFreePlanAttestation:
+        if self.attestation_hash != stable_hash(
+            self.model_dump(mode="json", exclude={"attestation_hash"})
+        ):
+            raise ValueError("Zilliz Free-plan attestation hash differs")
+        return self
+
+    @classmethod
+    def operator_provisioned(cls, authority_id: str) -> ZillizFreePlanAttestation:
+        values = {
+            "schema_version": 1,
+            "attestation_version": "operator_provisioned_zilliz_free_plan_v1",
+            "deployment_plan": "free",
+            "authority_id": authority_id,
+        }
+        return cls(**values, attestation_hash=stable_hash(values))
 
 
 class ZillizBm25CollectionSchema(ContractModel):
@@ -76,13 +114,14 @@ class ZillizBm25CollectionSchema(ContractModel):
 class ZillizBm25RetrievalPolicySnapshot(ContractModel):
     schema_version: Literal[1] = 1
     provider_id: Literal["zilliz_cloud"] = "zilliz_cloud"
-    provider_profile_id: Literal["zilliz_cloud_free_serverless_bm25_v1"] = (
-        "zilliz_cloud_free_serverless_bm25_v1"
+    provider_profile_id: Literal["zilliz_cloud_free_plan_bm25_v1"] = (
+        "zilliz_cloud_free_plan_bm25_v1"
     )
     adapter_id: Literal["zilliz_milvus_bm25"] = "zilliz_milvus_bm25"
     adapter_version: Literal[ZILLIZ_BM25_ADAPTER_VERSION] = ZILLIZ_BM25_ADAPTER_VERSION
     endpoint: Annotated[str, StringConstraints(min_length=1, max_length=2048)]
     canonical_endpoint_hash: Sha256
+    free_plan_attestation: ZillizFreePlanAttestation
     collection_id: SafeId
     collection_schema: ZillizBm25CollectionSchema
     max_query_bytes: int = Field(default=16_000, ge=1, le=64_000)
@@ -97,13 +136,13 @@ class ZillizBm25RetrievalPolicySnapshot(ContractModel):
     @field_validator("endpoint")
     @classmethod
     def endpoint_is_valid(cls, value: str) -> str:
-        canonicalize_zilliz_free_endpoint(value)
+        canonicalize_zilliz_free_or_serverless_endpoint(value)
         return value
 
     @model_validator(mode="after")
     def identity_is_valid(self) -> ZillizBm25RetrievalPolicySnapshot:
         if self.canonical_endpoint_hash != sha256_text(
-            canonicalize_zilliz_free_endpoint(self.endpoint)
+            canonicalize_zilliz_free_or_serverless_endpoint(self.endpoint)
         ):
             raise ValueError("Zilliz endpoint hash differs")
         reservation = self.provider_reservation
@@ -115,7 +154,7 @@ class ZillizBm25RetrievalPolicySnapshot(ContractModel):
             or reservation.tool_calls != 1
             or reservation.pricing_policy_id != "zilliz_cloud_free_zero_cost"
         ):
-            raise ValueError("Zilliz Free reservation differs from policy")
+            raise ValueError("Zilliz Free-plan reservation differs from policy")
         if self.policy_hash != self.compute_hash():
             raise ValueError("Zilliz retrieval policy hash differs")
         return self

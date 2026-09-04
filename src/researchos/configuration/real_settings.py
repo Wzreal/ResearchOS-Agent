@@ -27,7 +27,8 @@ from researchos.domain.retrieval import (
     ZILLIZ_BM25_ADAPTER_VERSION,
     ZillizBm25CollectionSchema,
     ZillizBm25RetrievalPolicySnapshot,
-    canonicalize_zilliz_free_endpoint,
+    ZillizFreePlanAttestation,
+    canonicalize_zilliz_free_or_serverless_endpoint,
 )
 from researchos.domain.runtime import IdempotencyMode
 from researchos.domain.tools import (
@@ -507,11 +508,16 @@ def default_managed_retrieval_capability(
     *,
     endpoint: str,
     collection_id: str,
+    free_plan_attestation: ZillizFreePlanAttestation | None = None,
     credential_slot_id: str = "researchos_zilliz_token",
     max_results: int = 20,
     total_timeout_ms: int = 60_000,
 ) -> RealCapabilitySettings:
-    endpoint = canonicalize_zilliz_free_endpoint(endpoint)
+    if free_plan_attestation is None:
+        raise ValueError(
+            "Zilliz Free-plan attestation is required for zero-cost retrieval"
+        )
+    endpoint = canonicalize_zilliz_free_or_serverless_endpoint(endpoint)
     rules_hash = stable_hash({"policy": "zilliz-cloud-free-zero-cost-v1"})
     reservation = ProviderSuboperationReservation.build(
         reservation_version="zilliz-free-provider-suboperation-v1",
@@ -527,6 +533,7 @@ def default_managed_retrieval_capability(
     values = {
         "endpoint": endpoint,
         "canonical_endpoint_hash": hashlib.sha256(endpoint.encode()).hexdigest(),
+        "free_plan_attestation": free_plan_attestation,
         "collection_id": collection_id,
         "collection_schema": ZillizBm25CollectionSchema.standard(),
         "max_results": max_results,
