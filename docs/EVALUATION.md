@@ -1,7 +1,9 @@
 # ResearchOS Agent Evaluation Plan
 
-**Status:** Phase 7 harness implemented. No benchmark experiments have been run
-and this document contains no measured results.
+**Status:** Phase 7 harness implemented. No benchmark experiments or REAL
+quality/latency/cost measurements have been run. The Phase 9 schema-v1 fixture
+semantic baseline is published separately in [`RESULTS.md`](RESULTS.md); it is
+deterministic offline compatibility evidence, not a benchmark.
 
 ## Principles
 
