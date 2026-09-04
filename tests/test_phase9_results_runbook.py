@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from researchos.application.errors import CorruptEvidenceStore
+
 ROOT = Path(__file__).parents[1]
 CORPUS = ROOT / "tests" / "fixtures" / "schema_v1"
 RESULTS = ROOT / "docs" / "RESULTS.md"
@@ -29,7 +31,9 @@ def _published_block(document: str) -> str:
     return document[document.index(start) : document.index(end) + len(end)]
 
 
-def test_schema_v1_measurement_is_stable_and_published(tmp_path, monkeypatch):
+def test_repository_schema_v1_cli_succeeds_and_publishes_stable_baseline(
+    tmp_path, monkeypatch
+):
     module = _script_module()
     monkeypatch.setenv("RESEARCHOS_MEASUREMENT_CANARY", "must-not-appear")
     first = module.collect_semantic_baseline(CORPUS)
@@ -60,8 +64,35 @@ def test_schema_v1_measurement_is_stable_and_published(tmp_path, monkeypatch):
     assert occurrence["real_provider_calls"] == 0
 
 
+def test_release_cli_rejects_untouched_copied_corpus_without_output(tmp_path):
+    module = _script_module()
+    copied = tmp_path / "schema_v1"
+    shutil.copytree(CORPUS, copied)
+    output = tmp_path / "must_not_publish.json"
+
+    with pytest.raises(SystemExit, match="2"):
+        module.main(["--corpus", str(copied), "--output", str(output)])
+
+    assert not output.exists()
+
+
+def test_release_cli_rejects_symbolic_link_corpus_without_output(tmp_path):
+    module = _script_module()
+    linked = tmp_path / "schema_v1_link"
+    try:
+        linked.symlink_to(CORPUS, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this platform")
+    output = tmp_path / "must_not_publish.json"
+
+    with pytest.raises(SystemExit, match="2"):
+        module.main(["--corpus", str(linked), "--output", str(output)])
+
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("replacement", [(b"\r\n", b"\n"), (b"x", b"y")])
-def test_measurement_fails_closed_for_noncanonical_or_tampered_fixture(
+def test_collect_semantic_baseline_fails_closed_for_tampered_copied_fixture(
     tmp_path, replacement
 ):
     module = _script_module()
@@ -73,10 +104,9 @@ def test_measurement_fails_closed_for_noncanonical_or_tampered_fixture(
         target.write_bytes(original.replace(b"\n", b"\r\n"))
     else:
         target.write_bytes(original.replace(*replacement, 1))
-    output = tmp_path / "must_not_publish.json"
 
-    assert module.main(["--corpus", str(copied), "--output", str(output)]) == 1
-    assert not output.exists()
+    with pytest.raises(CorruptEvidenceStore):
+        module.collect_semantic_baseline(copied)
 
 
 def test_schema_fixture_bytes_are_eol_preserved_by_git_attributes():

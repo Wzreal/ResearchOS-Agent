@@ -98,11 +98,12 @@ def _metric_projection(metric: Any) -> dict[str, Any]:
 def collect_semantic_baseline(corpus: Path) -> dict[str, Any]:
     """Load a frozen v1 corpus and return its machine-independent projection."""
 
-    corpus = corpus.resolve()
+    supplied_corpus = Path(corpus)
+    if supplied_corpus.is_symlink():
+        raise ValueError("schema-v1 corpus must not be a symbolic link")
+    corpus = supplied_corpus.resolve()
     if not corpus.is_dir():
         raise ValueError("schema-v1 corpus directory is absent")
-    if corpus.is_symlink():
-        raise ValueError("schema-v1 corpus must not be a symbolic link")
 
     paths = [corpus / relative for relative in _REQUIRED_ARTIFACTS]
     missing = [
@@ -392,7 +393,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--print-markdown", action="store_true")
     args = parser.parse_args(argv)
-    corpus = args.corpus.resolve()
+    repository_root = Path(__file__).resolve().parents[1]
+    expected_corpus = (
+        repository_root / "tests" / "fixtures" / "schema_v1"
+    ).resolve()
+    supplied_corpus = args.corpus
+    if supplied_corpus.is_symlink():
+        parser.error("--corpus must not be a symbolic link")
+    corpus = supplied_corpus.resolve()
+    if corpus != expected_corpus:
+        parser.error("--corpus must be the repository tests/fixtures/schema_v1 corpus")
     output = args.output.resolve()
     if output.is_relative_to(corpus):
         parser.error("--output must not be inside the frozen fixture corpus")
