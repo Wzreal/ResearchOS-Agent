@@ -1,4 +1,4 @@
-# Phase 9 Design — Phase 9A, 9B, and 9C Implemented Boundary
+# Phase 9 Design — Phase 9A, 9B, 9C, and optional 9D observability boundary
 
 ## Scope
 
@@ -8,6 +8,18 @@ Phase 1-8 authority schemas. Phase 9C adds bounded Zilliz BM25 retrieval.
 Playwright, embeddings, hybrid retrieval,
 Langfuse, Claim Extraction, workflow coordination, real E2E, and benchmark
 results are not implemented.
+
+## Phase 9D optional observability boundary
+
+Phase 9D mirrors already-accepted canonical local trace events to optional
+OTLP/HTTP protobuf export. `ObservabilityRuntime` owns bounded background
+workers so synchronous trace callers never require an asyncio loop. Local
+append remains first and authoritative; append-once no-ops are not exported,
+observability diagnostics remain local-only, and remote delivery is
+non-durable/no-retry best effort. OTLP permits direct HTTPS only, disables
+redirects and environment proxies, bounds HTTP/request/response resources, and
+uses only a validated secret-sourced auth header. Disabled mode creates no
+exporter worker.
 
 ## Phase 9C retrieval boundary
 

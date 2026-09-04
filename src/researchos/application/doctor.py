@@ -11,6 +11,7 @@ from pydantic import Field
 
 from researchos.application.errors import RunConfigurationError
 from researchos.application.real_composition import RealCompositionManager
+from researchos.configuration.observability import OtlpHttpSettings
 from researchos.configuration.real_settings import RealIntegrationSettings
 from researchos.domain.contracts import ContractModel, RunState, SafeId
 from researchos.interfaces.providers import SecretSource
@@ -43,10 +44,12 @@ class RealDoctor:
         settings: RealIntegrationSettings,
         secrets: SecretSource,
         composition: RealCompositionManager | None = None,
+        observability: OtlpHttpSettings | None = None,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
         self._composition = composition
+        self._observability = observability
 
     def run(
         self,
@@ -90,6 +93,8 @@ class RealDoctor:
             )
         )
         required_modules = {"httpx"}
+        if self._observability is not None:
+            required_modules.add("opentelemetry.proto")
         if any(
             item.capability_id == "web_browser"
             for item in self._settings.capability_settings
@@ -114,6 +119,25 @@ class RealDoctor:
                 ),
             )
         )
+        if self._observability is not None:
+            value = (
+                self._secrets.get_secret(self._observability.auth_credential_slot_id)
+                if self._observability.auth_credential_slot_id is not None
+                else "configured"
+            )
+            checks.append(
+                DoctorCheck(
+                    check_id="observability_secret",
+                    status=(
+                        DoctorCheckStatus.PASS if value else DoctorCheckStatus.FAIL
+                    ),
+                    code=(
+                        "observability_secret_present"
+                        if value
+                        else "observability_secret_missing"
+                    ),
+                )
+            )
         if state is not None and self._composition is not None:
             try:
                 self._composition.validate_bound_state(state)

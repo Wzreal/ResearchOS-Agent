@@ -6,7 +6,7 @@ import asyncio
 import queue
 from collections.abc import Callable, Iterable
 from contextlib import suppress
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 
 from researchos.domain.contracts import TraceEvent, TraceEventType
 from researchos.domain.identity import stable_id
@@ -71,7 +71,14 @@ class _DiagnosticDispatcher:
 
 
 class ExporterDispatcher:
-    """Non-durable remote delivery workers; ``offer`` never performs I/O."""
+    """One owned exporter loop with synchronous bounded ingress.
+
+    A single background thread owns all async exporters and their clients.
+    Callers only mutate a standard-library thread-safe queue; they never touch
+    asyncio primitives or perform remote I/O.
+    """
+
+    _STOP = object()
 
     def __init__(
         self,
@@ -85,56 +92,71 @@ class ExporterDispatcher:
         exporter_ids = [item.exporter_id for item in self._exporters]
         if len(exporter_ids) != len(set(exporter_ids)):
             raise ValueError("exporter IDs must be unique")
-        self._queue: asyncio.Queue[tuple[ObservationExporter, ObservationEnvelope]] = (
-            asyncio.Queue(maxsize=self._policy.max_pending_deliveries)
-        )
+        self._queue: queue.Queue[
+            tuple[ObservationExporter, ObservationEnvelope] | object
+        ] = queue.Queue()
         self._failure_callback = failure_callback
-        self._diagnostics = _DiagnosticDispatcher(
-            max_pending=self._policy.max_pending_diagnostics,
-            max_concurrency=self._policy.max_diagnostic_concurrency,
+        self._diagnostics = (
+            _DiagnosticDispatcher(
+                max_pending=self._policy.max_pending_diagnostics,
+                max_concurrency=self._policy.max_diagnostic_concurrency,
+            )
+            if self._exporters
+            else None
         )
-        self._workers: list[asyncio.Task[None]] = []
+        self._state_lock = Lock()
+        self._pending = 0
+        self._drained = Event()
+        self._drained.set()
+        self._thread: Thread | None = None
         self._started = False
-        self._stopped = False
+        self._accepting = True
+        self._drain_on_stop = False
+        self._closed = False
+        self._owned_loop_id: int | None = None
 
     def start(self) -> None:
-        if self._started or self._stopped or not self._exporters:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        self._started = True
-        self._workers = [
-            loop.create_task(self._worker(), name=f"researchos-exporter-{index}")
-            for index in range(self._policy.max_concurrency)
-        ]
+        with self._state_lock:
+            if self._started or self._closed or not self._exporters:
+                return
+            self._started = True
+            self._thread = Thread(
+                target=self._thread_main,
+                name="researchos-exporter-loop",
+                daemon=True,
+            )
+            self._thread.start()
 
-    def set_failure_callback(
-        self, callback: FailureCallback
-    ) -> None:
+    def set_failure_callback(self, callback: FailureCallback) -> None:
         self._failure_callback = callback
 
     def offer(self, envelope: ObservationEnvelope) -> ExporterOfferResult:
         if not envelope.export or not self._exporters:
             return ExporterOfferResult.ACCEPTED
-        if self._stopped:
-            return ExporterOfferResult.DISPATCHER_STOPPED
-        if not self._started:
-            self.start()
-        if not self._started:
-            return ExporterOfferResult.DISPATCHER_STOPPED
+        self.start()
         required = len(self._exporters)
-        if self._queue.qsize() + required > self._policy.max_pending_deliveries:
-            return ExporterOfferResult.DROPPED_QUEUE_FULL
-        try:
+        with self._state_lock:
+            if not self._accepting or self._closed:
+                return ExporterOfferResult.DISPATCHER_STOPPED
+            if self._pending + required > self._policy.max_pending_deliveries:
+                return ExporterOfferResult.DROPPED_QUEUE_FULL
+            self._pending += required
+            self._drained.clear()
             for exporter in self._exporters:
                 self._queue.put_nowait((exporter, envelope))
-        except asyncio.QueueFull:
-            # The event-loop thread is the sole offer mutation boundary. This
-            # branch is defensive; DROP_NEW remains deterministic.
-            return ExporterOfferResult.DROPPED_QUEUE_FULL
         return ExporterOfferResult.ACCEPTED
+
+    @property
+    def worker_count(self) -> int:
+        return int(self._thread is not None)
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    @property
+    def owned_loop_id(self) -> int | None:
+        return self._owned_loop_id
 
     def offer_diagnostic(
         self,
@@ -143,43 +165,115 @@ class ExporterDispatcher:
         exporter_id: str,
         code: str,
     ) -> None:
-        """Submit local diagnostic I/O without touching the business loop."""
+        if self._diagnostics is not None:
+            self._diagnostics.offer(callback, envelope, exporter_id, code)
 
-        self._diagnostics.offer(callback, envelope, exporter_id, code)
+    def close_sync(self, *, drain: bool = False) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._accepting = False
+            self._drain_on_stop = drain
+            if not self._started and self._exporters:
+                # Ensure exporter cleanup happens in its one owned loop even
+                # when no observation was ever offered.
+                self._started = True
+                self._thread = Thread(
+                    target=self._thread_main,
+                    name="researchos-exporter-loop",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._queue.put_nowait(self._STOP)
+            thread = self._thread
+        if thread is not None:
+            thread.join()
+        with self._state_lock:
+            self._closed = True
+        if self._diagnostics is not None:
+            self._diagnostics.close()
 
     async def close(self, *, drain: bool = False) -> None:
-        self._stopped = True
-        if drain and self._workers:
-            await self._queue.join()
-        for worker in self._workers:
-            worker.cancel()
-        if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
-        self._workers.clear()
-        self._diagnostics.close()
+        await asyncio.to_thread(self.close_sync, drain=drain)
 
-    async def _worker(self) -> None:
-        while True:
-            exporter, envelope = await self._queue.get()
-            try:
+    def _thread_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._owned_loop_id = id(loop)
+        try:
+            loop.run_until_complete(self._run())
+            loop.run_until_complete(self._close_exporters())
+        finally:
+            loop.close()
+
+    async def _run(self) -> None:
+        semaphore = asyncio.Semaphore(self._policy.max_concurrency)
+        tasks: set[asyncio.Task[None]] = set()
+        stopping = False
+        while not stopping:
+            item = await asyncio.to_thread(self._queue.get)
+            if item is self._STOP:
+                stopping = True
+                continue
+            exporter, envelope = item
+            task = asyncio.create_task(self._deliver(exporter, envelope, semaphore))
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        if self._drain_on_stop:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            while True:
+                try:
+                    discarded = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if discarded is not self._STOP:
+                    self._settle_one()
+        while not self._drained.is_set():
+            await asyncio.sleep(0)
+
+    async def _deliver(
+        self,
+        exporter: ObservationExporter,
+        envelope: ObservationEnvelope,
+        semaphore: asyncio.Semaphore,
+    ) -> None:
+        try:
+            async with semaphore:
                 await asyncio.wait_for(
                     exporter.export(envelope),
                     timeout=self._policy.export_timeout_ms / 1_000,
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if self._failure_callback is not None:
-                    # Filesystem diagnostics execute on a bounded daemon-thread
-                    # boundary, never on the asyncio business loop.
-                    self._diagnostics.offer(
-                        self._failure_callback,
-                        envelope,
-                        exporter.exporter_id,
-                        type(exc).__name__,
-                    )
-            finally:
-                self._queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._failure_callback is not None and self._diagnostics is not None:
+                self._diagnostics.offer(
+                    self._failure_callback,
+                    envelope,
+                    exporter.exporter_id,
+                    type(exc).__name__,
+                )
+        finally:
+            self._settle_one()
+
+    def _settle_one(self) -> None:
+        with self._state_lock:
+            self._pending -= 1
+            if self._pending == 0:
+                self._drained.set()
+
+    async def _close_exporters(self) -> None:
+        for exporter in self._exporters:
+            closer = getattr(exporter, "aclose", None)
+            if closer is not None:
+                with suppress(Exception):
+                    await closer()
 
 
 class ObservationRecorder:
@@ -200,18 +294,26 @@ class ObservationRecorder:
     def record(self, envelope: ObservationEnvelope) -> AppendOnceResult:
         self._redactor.assert_safe_model(envelope)
         result = self._trace.append_once(envelope.descriptor)
-        if envelope.export and self._dispatcher is not None:
-            offered = self._dispatcher.offer(envelope)
-            if offered is not ExporterOfferResult.ACCEPTED:
-                # The original local event is already authoritative. A
-                # bounded best-effort diagnostic executes off the event loop.
-                self._dispatcher.offer_diagnostic(
-                    self._record_delivery_dropped,
-                    envelope,
-                    "exporter_dispatcher",
-                    offered.value,
-                )
+        if result is AppendOnceResult.APPENDED:
+            self.offer_persisted(envelope)
         return result
+
+    def offer_persisted(self, envelope: ObservationEnvelope) -> None:
+        """Offer an already-authoritative local event exactly once."""
+
+        self._redactor.assert_safe_model(envelope)
+        if not envelope.export or self._dispatcher is None:
+            return
+        offered = self._dispatcher.offer(envelope)
+        if offered is not ExporterOfferResult.ACCEPTED:
+            # The original local event is already authoritative. A bounded
+            # best-effort local diagnostic never enters the remote dispatcher.
+            self._dispatcher.offer_diagnostic(
+                self._record_delivery_dropped,
+                envelope,
+                "exporter_dispatcher",
+                offered.value,
+            )
 
     def record_descriptor(
         self,

@@ -229,20 +229,21 @@ def test_export_backpressure_diagnostic_failure_cannot_fail_business() -> None:
     asyncio.run(scenario())
 
 
-def test_export_offer_without_event_loop_is_isolated() -> None:
+def test_export_offer_without_event_loop_reaches_background_worker() -> None:
     trace = InMemoryTraceSink()
-    dispatcher = ExporterDispatcher(exporters=(MockObservationExporter(),))
+    exporter = MockObservationExporter()
+    dispatcher = ExporterDispatcher(exporters=(exporter,))
     recorder = ObservationRecorder(
         trace_sink=trace, clock=FrozenClock(NOW), dispatcher=dispatcher
     )
     recorder.record_descriptor(_descriptor("evt_sync_offer"))
     for _ in range(100):
-        events = trace.read("run_phase8")
-        if len(events) > 1:
+        if exporter.calls:
             break
         time.sleep(0.001)
-    assert events[0].event_id == "evt_sync_offer"
-    assert events[-1].event_type is TraceEventType.OBSERVABILITY_DELIVERY_DROPPED
+    assert trace.read("run_phase8")[0].event_id == "evt_sync_offer"
+    assert exporter.calls == 1
+    dispatcher.close_sync()
 
 
 def test_queue_full_slow_filesystem_diagnostic_never_blocks_event_loop(
