@@ -34,7 +34,6 @@ from researchos.application.run_manager import RunManager
 from researchos.domain.contracts import BudgetLimits, RunConfig, RunInput, RunStatus
 from researchos.domain.identity import stable_hash, stable_id
 from researchos.domain.real_composition import (
-    CapabilityCompositionPin,
     ModelCallPolicySnapshot,
     RealCompositionSnapshot,
 )
@@ -634,28 +633,80 @@ def test_unbound_factory_rejects_adapter_construction() -> None:
         RealIntegrationFactory(manager, run_store=runs).agent("run_real")
 
 
-def test_phase9a_real_capabilities_fail_closed_before_secret_or_dispatch() -> None:
-    settings = make_settings().model_copy(
-        update={
-            "capabilities": (
-                CapabilityCompositionPin(
-                    capability_id="python",
-                    adapter_id="python_subprocess",
-                    operation_version="v1",
-                    tool_id="python_tool",
-                ),
-            )
-        }
-    )
-    guard = RealCompositionManager(
-        settings=settings,
-        secrets=DictSecrets(),
-        store=InMemoryRealCompositionStore(clock=FrozenClock()),
-    )
-    with pytest.raises(RunConfigurationError, match="deferred until Phase 9B"):
-        guard.validate_create(
-            make_real_config(allowed_capability_ids=("python",))
+def test_phase9b_capability_pin_without_exact_policy_is_rejected() -> None:
+    from researchos.configuration.real_settings import default_browser_capability
+
+    settings = make_settings()
+    with pytest.raises(ValueError, match="pins differ"):
+        type(settings)(
+            models=settings.models,
+            capabilities=(default_browser_capability().pin(),),
         )
+
+
+def test_phase9b_web_agent_contract_changes_bundle_and_composition_identity() -> None:
+    from researchos.configuration.real_settings import default_tavily_capability
+
+    direct = make_settings()
+    web = make_settings(capability_settings=(default_tavily_capability(),))
+    direct_agent = direct.model_for_role("agent")
+    web_agent = web.model_for_role("agent")
+
+    assert direct_agent.response_contract_version == "agent-direct-decision-v1"
+    assert web_agent.response_contract_version == "agent-tool-decision-v2"
+    assert direct_agent.prompt_content_hash != web_agent.prompt_content_hash
+    assert (
+        direct_agent.bundle().model_bundle_hash
+        != web_agent.bundle().model_bundle_hash
+    )
+    assert (
+        make_snapshot(direct).composition_hash
+        != make_snapshot(web).composition_hash
+    )
+
+
+def test_phase9b_factory_builds_run_bound_real_capability_registry() -> None:
+    from researchos.configuration.real_settings import default_browser_capability
+
+    capability = default_browser_capability()
+    settings = make_settings(capability_settings=(capability,))
+    manager, guard, _, runs, _ = _real_lifecycle(settings=settings)
+    state = manager.create(
+        RunInput(query="real"),
+        make_real_config(allowed_capability_ids=("web_browser",)),
+    )
+    manager.transition(state.run_id, RunStatus.PLANNING)
+    manager.transition(state.run_id, RunStatus.READY)
+    manager.transition(state.run_id, RunStatus.RUNNING)
+    registry = RealIntegrationFactory(guard, run_store=runs).capability_registry(
+        state.run_id
+    )
+    descriptor = registry.resolve("web_browser").descriptor
+    assert descriptor == capability.descriptor()
+    assert descriptor.operation_version.endswith(capability.policy_hash)
+
+
+def test_phase9b_factory_can_evict_process_local_registry_reference() -> None:
+    from researchos.configuration.real_settings import default_browser_capability
+
+    settings = make_settings(capability_settings=(default_browser_capability(),))
+    manager, guard, _, runs, _ = _real_lifecycle(settings=settings)
+    state = manager.create(
+        RunInput(query="real"),
+        make_real_config(allowed_capability_ids=("web_browser",)),
+    )
+    manager.transition(state.run_id, RunStatus.PLANNING)
+    manager.transition(state.run_id, RunStatus.READY)
+    manager.transition(state.run_id, RunStatus.RUNNING)
+    factory = RealIntegrationFactory(guard, run_store=runs)
+
+    factory.capability_registry(state.run_id)
+    manager.finalize(state.run_id, RunStatus.CANCELLED, reason="cleanup")
+
+    with pytest.raises(RunConfigurationError, match="terminal Run"):
+        factory.capability_registry(state.run_id)
+
+    assert state.run_id not in factory._registries
 
 
 def test_factory_enforces_role_specific_run_lifecycle_before_transport() -> None:

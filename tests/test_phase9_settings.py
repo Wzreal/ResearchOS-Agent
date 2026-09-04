@@ -132,6 +132,28 @@ def test_environment_loader_resolves_complete_effective_settings() -> None:
     assert "credential-one" not in settings.model_dump_json()
 
 
+def test_environment_loader_resolves_exact_phase9b_capabilities() -> None:
+    environment = _environment()
+    environment["RESEARCHOS_REAL_CAPABILITIES"] = "web_search,web_browser"
+    environment["RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS"] = "90000"
+    environment["RESEARCHOS_TAVILY_MICROUNITS_PER_CREDIT"] = "125000"
+    settings = load_real_integration_settings(environment)
+    assert tuple(item.capability_id for item in settings.capability_settings) == (
+        "web_browser",
+        "web_search",
+    )
+    search = settings.capability_for_id("web_search")
+    assert search.provider_reservation.cost_microunits == 125_000
+    assert search.pin() in settings.capabilities
+
+
+def test_environment_loader_rejects_unknown_real_capability() -> None:
+    environment = _environment()
+    environment["RESEARCHOS_REAL_CAPABILITIES"] = "python"
+    with pytest.raises(ValueError, match="unsupported REAL capability"):
+        load_real_integration_settings(environment)
+
+
 def test_ignored_sampling_environment_values_do_not_change_identity() -> None:
     baseline = load_real_integration_settings(_environment())
     changed_environment = _environment()

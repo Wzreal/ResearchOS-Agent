@@ -6,7 +6,9 @@ from researchos.application.errors import (
     UnknownCapabilityError,
 )
 from researchos.domain.tools import AdapterMode
-from researchos.interfaces.tools import Tool
+from researchos.interfaces.tools import AuthorizedRealTool, Tool
+
+RegisteredTool = Tool | AuthorizedRealTool
 
 
 class CapabilityRegistry:
@@ -14,10 +16,10 @@ class CapabilityRegistry:
 
     def __init__(self, *, allowed_modes: frozenset[AdapterMode]) -> None:
         self._allowed_modes = allowed_modes
-        self._by_capability: dict[str, Tool] = {}
+        self._by_capability: dict[str, RegisteredTool] = {}
         self._tool_ids: set[str] = set()
 
-    def register(self, tool: Tool) -> None:
+    def register(self, tool: RegisteredTool) -> None:
         descriptor = tool.descriptor
         self.require_mode(descriptor.mode)
         if descriptor.capability_id in self._by_capability:
@@ -33,7 +35,7 @@ class CapabilityRegistry:
                 f"adapter mode {mode.value} is not enabled"
             )
 
-    def resolve(self, capability_id: str) -> Tool:
+    def resolve(self, capability_id: str) -> RegisteredTool:
         try:
             return self._by_capability[capability_id]
         except KeyError as exc:
@@ -41,7 +43,7 @@ class CapabilityRegistry:
 
     def resolve_authorized(
         self, capability_id: str, authorized_capability_ids: tuple[str, ...]
-    ) -> Tool:
+    ) -> RegisteredTool:
         tool = self.resolve(capability_id)
         if capability_id not in authorized_capability_ids:
             raise ToolPermissionDenied(capability_id)
@@ -49,6 +51,5 @@ class CapabilityRegistry:
 
     def descriptors(self):
         return tuple(
-            self._by_capability[key].descriptor
-            for key in sorted(self._by_capability)
+            self._by_capability[key].descriptor for key in sorted(self._by_capability)
         )

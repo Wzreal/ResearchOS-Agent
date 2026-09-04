@@ -947,3 +947,73 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   first-writer guarantees are in-process; deployment permits one writer
   process per Run. Tavily, Browser, embeddings, Milvus, Langfuse, automatic
   Claim Extraction, workflow sequencing, and real E2E remain Phase 9B-9E.
+
+## ADR-0026: Bind REAL web capabilities to immutable policy and existing runtime authority
+
+- **Status:** Accepted
+- **Date:** 2026-09-02
+- **Context:** Phase 9B enables model-selected Search and Browser operations.
+  Registry presence is not permission, a model-authored call ID is not durable
+  Tool identity, provider metadata is not source evidence, and URL validation
+  without connection pinning does not close DNS rebinding.
+- **Decision:** Freeze each REAL capability's descriptor, adapter and operation
+  versions, exact policy hash, and provider-reservation hash in the existing
+  REAL composition. Keep `ToolInvocationRequest` v1 unchanged; `AgentRunner`
+  constructs an ephemeral `AuthorizedToolDispatchEnvelope` containing the full
+  immutable task contract and its hash. A narrow REAL Tool port accepts only
+  that envelope. Immediately before secret access or DNS, the authorizer
+  reloads Run/composition authority, requires `RUNNING`, checks task and
+  capability permission, registry binding, descriptor, operation version,
+  policy, reservation, and currency. The existing AgentRunner usage
+  accumulator performs remaining-limit admission before every provider-backed
+  Agent decision and Tool dispatch. Adapters do not retry; a retryable Tool
+  failure terminates the current attempt so Phase 3 remains retry owner.
+
+  Tavily uses only the frozen STANDARD `POST https://api.tavily.com/search`
+  profile, explicit documented fields, no redirects, environment proxy, or
+  retry, and a versioned conservative one-credit USD upper-bound reservation.
+  Provider summaries are `SearchResultV2` metadata and produce no Evidence.
+  Existing SearchResult v1 behavior and extraction remain unchanged.
+
+  Capability-empty Phase 9A Runs retain their direct-only Agent prompt/schema
+  and `agent-direct-decision-v1` identity. Enabling Search or Browser selects
+  `agent-tool-decision-v2`; its prompt/schema hash flows through the Agent
+  model bundle and REAL composition, so resume never reinterprets old authority.
+
+  The Browser freezes exact HTTP(S)/port tuples; a ResearchOS-owned special-use
+  address table/version/hash plus IPv4-mapped and mixed-DNS policy;
+  DNS/rebinding, redirect, ASCII canonical-target reject-non-ASCII, extraction,
+  and NFC/newline normalization versions; MIME/charset/identity-encoding
+  allowlists; User-Agent; and relevant URL/body/time bounds in its composition
+  policy. The custom pinned asyncio HTTP/1.1 transport consumes these pins,
+  rejects ambiguous whitespace/Unicode targets, requires two identical bounded
+  DNS answer sets per hop, connects to a selected numeric address, verifies the
+  connected peer, preserves hostname TLS SNI/certificate validation, and handles
+  every redirect as a fresh authorization hop. Its frozen total timeout bounds
+  the full invocation and equals the provider reservation duration. This is an
+  SSRF control for the supported HTTP Browser, not a hostile-code sandbox.
+
+  A known terminal Search/Browser result consumes one logical Tool call once
+  invocation began, independent of provider HTTP dispatch; reservation denial
+  before invocation consumes zero. Tavily uses a request-scoped HTTPX client,
+  so cached per-Run registry bindings do not retain unclosed clients.
+
+  Phase 9B introduces explicit application-only admission and retry-delegation
+  markers. The capability-empty Phase 9A direct Agent profile preserves its
+  original per-call token/cost task-limit preflight and does not use the Phase
+  9B accumulated remaining-budget admission. Only the versioned web-tool Agent
+  profile uses that new admission. Only Tavily and Browser explicitly delegate
+  retryable infrastructure failures to Phase 3; historical Tool retryability
+  retains its Agent observation semantics. Agent HTTP operations remain bounded
+  end-to-end by the minimum of the frozen web Agent total-call timeout and the
+  absolute task deadline. HTTPX phase timeouts remain stall bounds only.
+  Factory registry caching releases terminal Runs on the next registry access
+  and also has an explicit `evict_capability_registry` process-local lifecycle
+  boundary. Unknown Tool dispatch/cancellation outcomes fail closed; their
+  monetary usage is never silently treated as zero.
+- **Consequences:** REAL Search/Browser resume only under identical immutable
+  semantics and cannot bypass existing lifecycle, authorization, retry, or
+  budget ownership. Tavily summaries can guide navigation but cannot silently
+  become evidence; validated Browser bodies may enter Phase 5 normally.
+  Cross-process Tool dedupe, JavaScript browsing, retrieval providers, real E2E,
+  and broader network sandboxing remain later Phase 9 work.

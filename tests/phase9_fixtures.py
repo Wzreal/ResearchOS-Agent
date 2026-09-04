@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from researchos.configuration.real_settings import (
+    RealCapabilitySettings,
     RealIntegrationSettings,
     RealModelSettings,
     default_deepseek_policy,
 )
 from researchos.configuration.validation import (
-    DEEPSEEK_RESPONSE_CONTRACTS,
     deepseek_prompt_content_hash,
+    deepseek_response_contract,
 )
 from researchos.domain.contracts import (
     BudgetLimits,
@@ -48,16 +49,28 @@ def make_settings(
     *,
     policy_overrides: dict[str, object] | None = None,
     role_overrides: dict[str, dict[str, object]] | None = None,
+    capability_settings: tuple[RealCapabilitySettings, ...] = (),
 ) -> RealIntegrationSettings:
     role_overrides = role_overrides or {}
+    capability_settings = tuple(
+        sorted(capability_settings, key=lambda item: item.capability_id)
+    )
+    enable_web_tools = bool(capability_settings)
     models = []
     for role in ("agent", "planning", "verification"):
         model_id = (
             "deepseek-v4-flash" if role == "agent" else "deepseek-v4-pro"
         )
         model_id = str(role_overrides.get(role, {}).get("model_id", model_id))
+        effective_policy_overrides = dict(policy_overrides or {})
+        if role == "agent" and enable_web_tools:
+            effective_policy_overrides.setdefault(
+                "provider_total_call_timeout_ms", 90_000
+            )
+        else:
+            effective_policy_overrides.pop("provider_total_call_timeout_ms", None)
         policy = default_deepseek_policy(
-            model_id=model_id, **(policy_overrides or {})
+            model_id=model_id, **effective_policy_overrides
         )
         values: dict[str, object] = {
             "role_id": role,
@@ -67,14 +80,22 @@ def make_settings(
             "adapter_version": "v1",
             "base_endpoint": "https://api.deepseek.com",
             "prompt_schema_version": "deepseek-prompt-v1",
-            "prompt_content_hash": deepseek_prompt_content_hash(role),
-            "response_contract_version": DEEPSEEK_RESPONSE_CONTRACTS[role],
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                role, enable_web_tools=(role == "agent" and enable_web_tools)
+            ),
+            "response_contract_version": deepseek_response_contract(
+                role, enable_web_tools=(role == "agent" and enable_web_tools)
+            ),
             "policy": policy,
             "credential_slot_id": "researchos_deepseek_api_key",
         }
         values.update(role_overrides.get(role, {}))
         models.append(RealModelSettings.model_validate(values))
-    return RealIntegrationSettings(models=tuple(models))
+    return RealIntegrationSettings(
+        models=tuple(models),
+        capabilities=tuple(item.pin() for item in capability_settings),
+        capability_settings=capability_settings,
+    )
 
 
 def make_snapshot(

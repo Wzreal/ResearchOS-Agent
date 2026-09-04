@@ -204,6 +204,37 @@ class SearchResult(ContractModel):
     hits: tuple[SearchHit, ...]
 
 
+class SearchContentKind(StrEnum):
+    SOURCE_EXCERPT = "source_excerpt"
+    PROVIDER_SUMMARY_METADATA = "provider_summary_metadata"
+
+
+class SearchHitV2(ContractModel):
+    locator: Annotated[str, StringConstraints(min_length=1, max_length=2_048)]
+    url: Annotated[str, StringConstraints(min_length=1, max_length=2_048)]
+    title: Annotated[str, StringConstraints(min_length=1, max_length=1_000)]
+    snippet: Annotated[str, StringConstraints(max_length=10_000)]
+    content_kind: SearchContentKind
+    retrieved_at: datetime
+    adapter_id: SafeId
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+    _aware = field_validator("retrieved_at")(_require_aware)
+    _http_url = field_validator("url")(SearchHit.url_is_http.__func__)
+
+    @field_validator("provenance")
+    @classmethod
+    def provenance_is_json(cls, value: dict[str, Any]) -> dict[str, Any]:
+        json.dumps(value, allow_nan=False)
+        return value
+
+
+class SearchResultV2(ContractModel):
+    output_type: Literal["search_result_v2"] = "search_result_v2"
+    adapter_id: SafeId
+    hits: tuple[SearchHitV2, ...]
+
+
 class BrowserRequest(ContractModel):
     input_type: Literal["browser"] = "browser"
     url: Annotated[str, StringConstraints(min_length=1, max_length=2_048)]
@@ -239,7 +270,11 @@ ToolInput = Annotated[
     Field(discriminator="input_type"),
 ]
 ToolOutput = Annotated[
-    LocalRetrievalResult | PythonExecutionResult | SearchResult | BrowserResult,
+    LocalRetrievalResult
+    | PythonExecutionResult
+    | SearchResult
+    | SearchResultV2
+    | BrowserResult,
     Field(discriminator="output_type"),
 ]
 

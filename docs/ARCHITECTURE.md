@@ -343,7 +343,7 @@ never block the asyncio business loop.
 8. Evaluation reads frozen artifacts and publishes a standalone EvaluationRun;
    it never finalizes or otherwise mutates the evaluated Run.
 
-## Phase 9A real integration boundary
+## Phase 9 real integration boundary
 
 REAL LLM composition is an additive authority outside `RunState`. Its nested,
 non-circular hashes freeze effective provider behavior without persisting
@@ -355,15 +355,18 @@ requires process-local adapter binding.
 DeepSeek is implemented behind the existing PlanningModel, Agent, and
 VerificationModel ports through a bounded raw HTTPX transport with no retry or
 REAL-to-MOCK fallback. Phase 8 durable DISPATCHED continues to dominate
-verification transport diagnostics. Later Phase 9 provider capabilities remain
-outside this boundary. A read-only dispatch authorizer enforces role-specific
+verification transport diagnostics. A read-only dispatch authorizer enforces role-specific
 Run status at adapter construction and immediately before each call. The call
 check also reloads and validates durable composition, recomputes current
 semantics, and matches the local binding before HTTP. DeepSeek is HTTPS-only;
 its explicit thinking/reasoning policy and per-model pricing upper bounds are
-composition-frozen, and local monetary usage is `UPPER_BOUND`. Phase 9A fails
-closed for non-empty REAL capability sets until Phase 9B binds exact per-Run
-Tool schemas.
+composition-frozen, and local monetary usage is `UPPER_BOUND`. Phase 9B binds
+exact per-Run Search/Browser capability descriptors, policies, reservations,
+and operation versions. An ephemeral task-authority envelope and an immediate
+read-only Run/composition check protect every REAL Tool dispatch. AgentRunner
+performs repeated remaining-hard-limit admission and Phase 3 retains retry and
+budget-ledger ownership. Tavily metadata uses a versioned output contract while
+historical Tool schemas remain unchanged.
 
 Phase 6 freezes the Phase 5 Claim Graph and Evidence Store once per invocation.
 It admits only whole Claim/Evidence items, derives structural support from the

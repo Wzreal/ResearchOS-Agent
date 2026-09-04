@@ -15,7 +15,9 @@ from researchos.domain.identity import (
 from researchos.domain.tools import (
     BrowserResult,
     LocalRetrievalResult,
+    SearchContentKind,
     SearchResult,
+    SearchResultV2,
     ToolInvocationStatus,
 )
 
@@ -37,6 +39,7 @@ def canonicalize_url(value: str) -> str:
 class EvidenceExtractor:
     extractor_id = "phase5_extractor"
     extractor_version = "1"
+    implementation_version = "2"
 
     def extract(
         self, context: AgentContext, observation: AgentObservation
@@ -124,6 +127,40 @@ class EvidenceExtractor:
                         observed_at=hit.retrieved_at,
                         extraction_context={
                             "output_type": "search_result",
+                            "snippet_locator_hash": sha256_text(snippet_identity),
+                        },
+                    )
+                )
+            return tuple(candidates)
+        if isinstance(output, SearchResultV2):
+            candidates = []
+            for hit in output.hits:
+                if hit.content_kind is not SearchContentKind.SOURCE_EXCERPT:
+                    continue
+                locator = canonicalize_url(hit.url)
+                snippet_identity = stable_hash(
+                    [locator, sha256_text(normalize_content(hit.snippet))]
+                )
+                candidates.append(
+                    EvidenceCandidate(
+                        **{**common, "extractor_version": "2"},
+                        source_type=SourceType.WEB,
+                        original_locator=hit.url,
+                        canonical_locator=locator,
+                        evidence_scope_key=stable_id(
+                            "scope",
+                            [
+                                "search-source-excerpt-v2",
+                                observation.tool_input_hash,
+                                snippet_identity,
+                            ],
+                        ),
+                        media_type="text/plain",
+                        content=hit.snippet,
+                        observed_at=hit.retrieved_at,
+                        extraction_context={
+                            "output_type": "search_result_v2",
+                            "content_kind": hit.content_kind.value,
                             "snippet_locator_hash": sha256_text(snippet_identity),
                         },
                     )

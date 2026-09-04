@@ -4,17 +4,29 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from researchos.adapters.browser import (
+    BoundedBrowserTool,
+    PinnedHttpTransport,
+    SystemHostResolver,
+    TrafilaturaSubprocessExtractor,
+)
+from researchos.adapters.clock import SystemClock
 from researchos.adapters.deepseek import (
     DeepSeekAgent,
     DeepSeekPlanningModel,
     DeepSeekVerificationModel,
 )
 from researchos.adapters.openai_compatible import OpenAICompatibleChatTransport
+from researchos.adapters.tavily import HttpxTavilyTransport, TavilySearchTool
+from researchos.application.capability_registry import CapabilityRegistry
+from researchos.application.errors import RunConfigurationError
 from researchos.application.provider_dispatch import RunLifecycleDispatchAuthorizer
 from researchos.application.real_composition import (
     BoundRealModel,
     RealCompositionManager,
 )
+from researchos.domain.contracts import TERMINAL_STATUSES
+from researchos.domain.tools import AdapterMode
 from researchos.interfaces.lifecycle import RunStore
 
 TransportFactory = Callable[[BoundRealModel], OpenAICompatibleChatTransport]
@@ -29,8 +41,10 @@ class RealIntegrationFactory:
         transport_factory: TransportFactory = OpenAICompatibleChatTransport,
     ) -> None:
         self._manager = manager
+        self._run_store = run_store
         self._transport_factory = transport_factory
         self._authorizer = RunLifecycleDispatchAuthorizer(run_store, manager)
+        self._registries: dict[str, CapabilityRegistry] = {}
 
     def planning_model(self, run_id: str) -> DeepSeekPlanningModel:
         self._authorizer.authorize(run_id=run_id, role_id="planning")
@@ -44,9 +58,7 @@ class RealIntegrationFactory:
             bound, self._transport_factory(bound), self._authorizer
         )
 
-    def trusted_runtime_replanning_model(
-        self, run_id: str
-    ) -> DeepSeekPlanningModel:
+    def trusted_runtime_replanning_model(self, run_id: str) -> DeepSeekPlanningModel:
         self._authorizer.authorize(
             run_id=run_id, role_id="planning", trusted_runtime_replan=True
         )
@@ -85,3 +97,65 @@ class RealIntegrationFactory:
         return DeepSeekVerificationModel(
             bound, self._transport_factory(bound), self._authorizer
         )
+
+    def capability_registry(self, run_id: str) -> CapabilityRegistry:
+        state = self._run_store.load(run_id)
+        if state.status in TERMINAL_STATUSES:
+            self.evict_capability_registry(run_id)
+            raise RunConfigurationError(
+                "terminal Run cannot retain a REAL capability registry"
+            )
+        existing = self._registries.get(run_id)
+        if existing is not None:
+            return existing
+        registry = CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL}))
+        self._registries[run_id] = registry
+        try:
+            for capability_id in self._manager.configured_capability_ids():
+                bound = self._manager.bound_capability(run_id, capability_id)
+                from researchos.application.real_tool_dispatch import (
+                    RealToolDispatchAuthorizer,
+                )
+
+                tool_authorizer = RealToolDispatchAuthorizer(
+                    runs=self._run_store,
+                    compositions=self._manager,
+                    registry=registry,
+                    bound=bound,
+                )
+                if capability_id == "web_search":
+                    policy = bound.settings.tavily_policy
+                    assert policy is not None
+                    tool = TavilySearchTool(
+                        bound=bound,
+                        authorizer=tool_authorizer,
+                        compositions=self._manager,
+                        transport=HttpxTavilyTransport(policy.researchos),
+                        clock=SystemClock(),
+                    )
+                elif capability_id == "web_browser":
+                    policy = bound.settings.browser_policy
+                    assert policy is not None
+                    tool = BoundedBrowserTool(
+                        bound=bound,
+                        authorizer=tool_authorizer,
+                        transport=PinnedHttpTransport(
+                            SystemHostResolver(),
+                            max_dns_answers=policy.max_dns_answers,
+                            address_policy=policy.address_policy,
+                        ),
+                        extractor=TrafilaturaSubprocessExtractor(),
+                        clock=SystemClock(),
+                    )
+                else:  # pragma: no cover - settings validation is closed-world
+                    raise ValueError("unsupported REAL capability")
+                registry.register(tool)
+            return registry
+        except Exception:
+            self._registries.pop(run_id, None)
+            raise
+
+    def evict_capability_registry(self, run_id: str) -> None:
+        """Release the factory's process-local registry reference for a Run."""
+
+        self._registries.pop(run_id, None)
