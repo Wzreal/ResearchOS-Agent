@@ -52,6 +52,7 @@ addopts = "-ra"
 testpaths = ["tests"]
 markers = [
     "requires_real_extra: test instantiates an optional third-party REAL adapter",
+    "requires_real_smoke: operator-only test that may make paid REAL provider calls",
 ]
 
 [tool.ruff]

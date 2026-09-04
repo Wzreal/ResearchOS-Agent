@@ -1,0 +1,62 @@
+name: REAL smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      paid_call_acknowledged:
+        description: "I acknowledge that this smoke test can make paid REAL calls"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  real-smoke:
+    # Do not expose the protected Environment to feature branches. github.sha
+    # is supplied by the allowed dispatch event, never by a text input.
+    if: >-
+      inputs.paid_call_acknowledged == true &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/release-'))
+    environment: researchos-real-smoke
+    env:
+      RESEARCHOS_REAL_SMOKE_ACKNOWLEDGED: "true"
+      RESEARCHOS_DEEPSEEK_API_KEY: ${{ secrets.RESEARCHOS_DEEPSEEK_API_KEY }}
+      RESEARCHOS_DEEPSEEK_BASE_ENDPOINT: ${{ vars.RESEARCHOS_DEEPSEEK_BASE_ENDPOINT }}
+      RESEARCHOS_DEEPSEEK_ADAPTER_VERSION: ${{ vars.RESEARCHOS_DEEPSEEK_ADAPTER_VERSION }}
+      RESEARCHOS_DEEPSEEK_PLANNING_MODEL: ${{ vars.RESEARCHOS_DEEPSEEK_PLANNING_MODEL }}
+      RESEARCHOS_DEEPSEEK_AGENT_MODEL: ${{ vars.RESEARCHOS_DEEPSEEK_AGENT_MODEL }}
+      RESEARCHOS_DEEPSEEK_VERIFICATION_MODEL: ${{ vars.RESEARCHOS_DEEPSEEK_VERIFICATION_MODEL }}
+      RESEARCHOS_DEEPSEEK_PLANNING_THINKING_MODE: ${{ vars.RESEARCHOS_DEEPSEEK_PLANNING_THINKING_MODE }}
+      RESEARCHOS_DEEPSEEK_AGENT_THINKING_MODE: ${{ vars.RESEARCHOS_DEEPSEEK_AGENT_THINKING_MODE }}
+      RESEARCHOS_DEEPSEEK_VERIFICATION_THINKING_MODE: ${{ vars.RESEARCHOS_DEEPSEEK_VERIFICATION_THINKING_MODE }}
+      RESEARCHOS_DEEPSEEK_PLANNING_REASONING_EFFORT: ${{ vars.RESEARCHOS_DEEPSEEK_PLANNING_REASONING_EFFORT }}
+      RESEARCHOS_DEEPSEEK_AGENT_REASONING_EFFORT: ${{ vars.RESEARCHOS_DEEPSEEK_AGENT_REASONING_EFFORT }}
+      RESEARCHOS_DEEPSEEK_VERIFICATION_REASONING_EFFORT: ${{ vars.RESEARCHOS_DEEPSEEK_VERIFICATION_REASONING_EFFORT }}
+      RESEARCHOS_MAX_INPUT_TOKENS: ${{ vars.RESEARCHOS_MAX_INPUT_TOKENS }}
+      RESEARCHOS_MAX_OUTPUT_TOKENS: ${{ vars.RESEARCHOS_MAX_OUTPUT_TOKENS }}
+      RESEARCHOS_MAX_REQUEST_BYTES: ${{ vars.RESEARCHOS_MAX_REQUEST_BYTES }}
+      RESEARCHOS_MAX_RESPONSE_BYTES: ${{ vars.RESEARCHOS_MAX_RESPONSE_BYTES }}
+      RESEARCHOS_TEMPERATURE: ${{ vars.RESEARCHOS_TEMPERATURE }}
+      RESEARCHOS_TOP_P: ${{ vars.RESEARCHOS_TOP_P }}
+      RESEARCHOS_CONNECT_TIMEOUT_MS: ${{ vars.RESEARCHOS_CONNECT_TIMEOUT_MS }}
+      RESEARCHOS_READ_TIMEOUT_MS: ${{ vars.RESEARCHOS_READ_TIMEOUT_MS }}
+      RESEARCHOS_WRITE_TIMEOUT_MS: ${{ vars.RESEARCHOS_WRITE_TIMEOUT_MS }}
+      RESEARCHOS_POOL_TIMEOUT_MS: ${{ vars.RESEARCHOS_POOL_TIMEOUT_MS }}
+      RESEARCHOS_COST_CURRENCY: ${{ vars.RESEARCHOS_COST_CURRENCY }}
+      RESEARCHOS_MAX_COST_MICROUNITS_PER_CALL: ${{ vars.RESEARCHOS_MAX_COST_MICROUNITS_PER_CALL }}
+      RESEARCHOS_PRICING_POLICY_VERSION: ${{ vars.RESEARCHOS_PRICING_POLICY_VERSION }}
+      RESEARCHOS_INPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS: ${{ vars.RESEARCHOS_INPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS }}
+      RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS: ${{ vars.RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --all-extras
+      - run: uv run pytest --basetemp=.pytest_tmp -p no:cacheprovider -m requires_real_smoke

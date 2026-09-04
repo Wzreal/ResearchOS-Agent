@@ -1,0 +1,9 @@
+# Research Report
+
+Verification disposition: `verified`
+
+## Findings
+
+The evidence supports this claim\. [^cit_7ed94eb5a2610ad8f965ab9d0f4446be451379994fcfc03f2a4092d8a6e17c08]
+
+[^cit_7ed94eb5a2610ad8f965ab9d0f4446be451379994fcfc03f2a4092d8a6e17c08]: source=src_1dd6410d1cd3c93b87ccd27ed7852f3d34f842e77e7562c9b8669557d38f5038; evidence=ev_4ab4d75066abce27441b874262fe610c8c439bde0d3895d2dcb0b79ff998c410@1

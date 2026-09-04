@@ -1,4 +1,4 @@
-# Phase 9 Design — Phase 9A, 9B, 9C, and optional 9D observability boundary
+# Phase 9 Design — REAL integrations, observability, and release gates
 
 ## Scope
 
@@ -7,7 +7,33 @@ composition-frozen Tavily Search and a bounded HTTP Browser without changing
 Phase 1-8 authority schemas. Phase 9C adds bounded Zilliz BM25 retrieval.
 Playwright, embeddings, hybrid retrieval,
 Langfuse, Claim Extraction, workflow coordination, real E2E, and benchmark
-results are not implemented.
+results and the final operator runbook are not implemented. Phase 9 now also
+has release gates: an exact public DeepSeek origin allowlist, frozen v1
+compatibility fixtures, deterministic offline filesystem E2E, wheel
+installability CI, and a separately protected manual REAL smoke workflow.
+
+## Phase 9 release-gate boundary
+
+The supported DeepSeek REAL endpoint is exactly `https://api.deepseek.com`.
+Custom gateways, paths, explicit ports, userinfo, query strings and alternate
+hosts fail before a credential-bearing transport is constructed. This is a
+release profile and does not claim to make arbitrary provider endpoints safe.
+
+No general migration framework is introduced: the persisted contracts remain
+schema v1. `tests/fixtures/schema_v1` is a checked-in, byte-frozen release
+compatibility corpus. Tests load it through fresh adapters and never regenerate
+it; unknown, missing, tampered, and torn data fail closed.
+
+The deterministic filesystem E2E follows the legal RunManager lifecycle from
+`CREATED` through planning, durable execution, verification, evaluation, and
+`COMPLETED`. Evaluation is explicitly read-only and runs during `EVALUATING`
+with its nonterminal policy opt-in.
+
+The only REAL smoke workflow is `workflow_dispatch`, protected by GitHub
+Environment `researchos-real-smoke`, a paid-call acknowledgement, and an
+allowed-ref gate (`main` or `release-*`). The workflow cannot establish that
+Environment reviewers or deployment branch rules have been configured; those
+are mandatory operator release prerequisites.
 
 ## Phase 9D optional observability boundary
 
