@@ -8,6 +8,26 @@ Phase 1-8 authority schemas. Playwright, embeddings, Milvus, hybrid retrieval,
 Langfuse, Claim Extraction, workflow coordination, real E2E, and benchmark
 results are not implemented.
 
+## Phase 9C retrieval boundary
+
+Phase 9C adds only Zilliz Cloud Free serving-endpoint BM25 retrieval. It uses
+the existing Local Retrieval request/result contracts, but queries one
+operator-provisioned read-only collection through exactly one search RPC. The
+endpoint must be canonical `https://<cluster>.serverless.<region>.vectordb.zillizcloud.com/`;
+arbitrary Milvus, private, global, on-demand, Dedicated and explicit-port
+endpoints fail before credential lookup. The Free billing profile has a fixed
+zero monetary per-query upper bound, so its reservation has zero USD cost,
+one Tool call and the frozen total timeout. All billable/variable profiles are
+unsupported rather than represented by an operator estimate.
+
+The frozen collection schema includes document/chunk IDs, locator, content,
+stored content SHA-256 and bounded safe metadata. The adapter recomputes the
+returned UTF-8 content hash and rejects a mismatch before constructing a
+LocalRetrievalResult or permitting Phase 5 Evidence ingestion. No schema
+inspection RPC, collection mutation, embedding, dense/hybrid retrieval or
+reranking is performed. A retrieval-enabled Agent receives a new v3 tool
+response contract; Phase 9A direct v1 and Phase 9B web-only v2 remain frozen.
+
 ## Composition authority
 
 `ModelCallPolicySnapshot` freezes generation controls, the post-response

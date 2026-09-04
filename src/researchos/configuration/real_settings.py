@@ -23,6 +23,12 @@ from researchos.domain.real_composition import (
     ProviderSuboperationReservation,
     SamplingControlMode,
 )
+from researchos.domain.retrieval import (
+    ZILLIZ_BM25_ADAPTER_VERSION,
+    ZillizBm25CollectionSchema,
+    ZillizBm25RetrievalPolicySnapshot,
+    canonicalize_zilliz_free_endpoint,
+)
 from researchos.domain.runtime import IdempotencyMode
 from researchos.domain.tools import (
     AdapterMode,
@@ -154,7 +160,10 @@ class RealModelSettings(ContractModel):
             self.model_id
         ):
             raise ValueError("pricing safety profile differs from adapter authority")
-        is_web_agent = self.response_contract_version == "agent-tool-decision-v2"
+        is_web_agent = self.response_contract_version in {
+            "agent-tool-decision-v2",
+            "agent-tool-decision-v3",
+        }
         if is_web_agent and self.policy.provider_total_call_timeout_ms is None:
             raise ValueError("web Agent requires a total provider-call timeout")
         if not is_web_agent and self.policy.provider_total_call_timeout_ms is not None:
@@ -215,13 +224,14 @@ class RealCapabilitySettings(ContractModel):
     provider_reservation: ProviderSuboperationReservation
     tavily_policy: TavilySearchPolicySnapshot | None = None
     browser_policy: HttpBrowserPolicySnapshot | None = None
+    retrieval_policy: ZillizBm25RetrievalPolicySnapshot | None = None
     credential_slot_id: SafeId | None = None
 
     @model_validator(mode="after")
     def policy_is_exact(self) -> RealCapabilitySettings:
         selected = tuple(
             item
-            for item in (self.tavily_policy, self.browser_policy)
+            for item in (self.tavily_policy, self.browser_policy, self.retrieval_policy)
             if item is not None
         )
         if len(selected) != 1:
@@ -260,7 +270,7 @@ class RealCapabilitySettings(ContractModel):
                 != self.tavily_policy.researchos.credential_slot_id
             ):
                 raise ValueError("Tavily credential-slot identity differs")
-        else:
+        elif self.browser_policy is not None:
             if (
                 self.capability_id,
                 self.tool_id,
@@ -279,6 +289,26 @@ class RealCapabilitySettings(ContractModel):
                 raise ValueError("Browser capability descriptor differs")
             if self.credential_slot_id is not None:
                 raise ValueError("Browser capability cannot contain credential slot")
+        else:
+            assert self.retrieval_policy is not None
+            if (
+                self.capability_id,
+                self.tool_id,
+                self.adapter_id,
+                self.adapter_version,
+                self.input_type,
+                self.output_type,
+            ) != (
+                "managed_retrieval",
+                "zilliz_bm25_retrieval",
+                "zilliz_milvus_bm25",
+                ZILLIZ_BM25_ADAPTER_VERSION,
+                "local_retrieval",
+                "local_retrieval_result",
+            ):
+                raise ValueError("Zilliz retrieval capability descriptor differs")
+            if self.credential_slot_id != self.retrieval_policy.credential_slot_id:
+                raise ValueError("Zilliz retrieval credential-slot identity differs")
         return self
 
     @property
@@ -444,6 +474,7 @@ def default_browser_capability(
         pricing_policy_version="v1",
         pricing_rules_hash=rules_hash,
     )
+
     candidate = HttpBrowserPolicySnapshot.model_construct(
         address_policy=BrowserAddressPolicySnapshot.standard(),
         provider_reservation=reservation,
@@ -469,6 +500,60 @@ def default_browser_capability(
         policy_hash=policy.policy_hash,
         provider_reservation=reservation,
         browser_policy=policy,
+    )
+
+
+def default_managed_retrieval_capability(
+    *,
+    endpoint: str,
+    collection_id: str,
+    credential_slot_id: str = "researchos_zilliz_token",
+    max_results: int = 20,
+    total_timeout_ms: int = 60_000,
+) -> RealCapabilitySettings:
+    endpoint = canonicalize_zilliz_free_endpoint(endpoint)
+    rules_hash = stable_hash({"policy": "zilliz-cloud-free-zero-cost-v1"})
+    reservation = ProviderSuboperationReservation.build(
+        reservation_version="zilliz-free-provider-suboperation-v1",
+        duration_milliseconds=total_timeout_ms,
+        tokens=0,
+        cost_microunits=0,
+        cost_currency="USD",
+        tool_calls=1,
+        pricing_policy_id="zilliz_cloud_free_zero_cost",
+        pricing_policy_version="v1",
+        pricing_rules_hash=rules_hash,
+    )
+    values = {
+        "endpoint": endpoint,
+        "canonical_endpoint_hash": hashlib.sha256(endpoint.encode()).hexdigest(),
+        "collection_id": collection_id,
+        "collection_schema": ZillizBm25CollectionSchema.standard(),
+        "max_results": max_results,
+        "total_timeout_ms": total_timeout_ms,
+        "credential_slot_id": credential_slot_id,
+        "provider_reservation": reservation,
+    }
+    candidate = ZillizBm25RetrievalPolicySnapshot.model_construct(
+        **values, policy_hash="0" * 64
+    )
+    policy = ZillizBm25RetrievalPolicySnapshot(
+        **values, policy_hash=candidate.compute_hash()
+    )
+    return RealCapabilitySettings(
+        capability_id="managed_retrieval",
+        tool_id="zilliz_bm25_retrieval",
+        adapter_id="zilliz_milvus_bm25",
+        adapter_version=ZILLIZ_BM25_ADAPTER_VERSION,
+        input_type="local_retrieval",
+        output_type="local_retrieval_result",
+        side_effect=ToolSideEffect.EXTERNAL,
+        idempotency=IdempotencyMode.IDEMPOTENT,
+        policy_schema_version="zilliz-bm25-retrieval-policy-v1",
+        policy_hash=policy.policy_hash,
+        provider_reservation=reservation,
+        retrieval_policy=policy,
+        credential_slot_id=credential_slot_id,
     )
 
 

@@ -36,6 +36,7 @@ from researchos.adapters.sleeper import (
     AsyncioSleeper,
     ControlledSleeper,
 )
+from researchos.adapters.zilliz_retrieval import ZillizBm25RetrievalTool
 
 __all__ = [
     "FilesystemRunStore",
@@ -56,6 +57,7 @@ __all__ = [
     "ToolFixtureAction",
     "ToolFixtureKey",
     "LocalRetrievalTool",
+    "ZillizBm25RetrievalTool",
     "LocalRetrievalPolicy",
     "PythonSubprocessPolicy",
     "PythonSubprocessTool",

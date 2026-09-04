@@ -84,15 +84,9 @@ class RealDoctor:
             DoctorCheck(
                 check_id="secret_presence",
                 status=(
-                    DoctorCheckStatus.PASS
-                    if secrets_valid
-                    else DoctorCheckStatus.FAIL
+                    DoctorCheckStatus.PASS if secrets_valid else DoctorCheckStatus.FAIL
                 ),
-                code=(
-                    "secrets_present"
-                    if secrets_valid
-                    else "secret_missing"
-                ),
+                code=("secrets_present" if secrets_valid else "secret_missing"),
             )
         )
         required_modules = {"httpx"}
@@ -101,14 +95,17 @@ class RealDoctor:
             for item in self._settings.capability_settings
         ):
             required_modules.add("trafilatura")
+        if any(
+            item.capability_id == "managed_retrieval"
+            for item in self._settings.capability_settings
+        ):
+            required_modules.add("pymilvus")
         extras_valid = all(find_spec(name) is not None for name in required_modules)
         checks.append(
             DoctorCheck(
                 check_id="optional_dependencies",
                 status=(
-                    DoctorCheckStatus.PASS
-                    if extras_valid
-                    else DoctorCheckStatus.FAIL
+                    DoctorCheckStatus.PASS if extras_valid else DoctorCheckStatus.FAIL
                 ),
                 code=(
                     "optional_dependencies_present"
@@ -148,8 +145,7 @@ class RealDoctor:
             report.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         )
         if any(
-            isinstance(value, str) and value and value in encoded
-            for value in secrets
+            isinstance(value, str) and value and value in encoded for value in secrets
         ):
             raise ValueError("doctor report contains a credential canary")
         return report

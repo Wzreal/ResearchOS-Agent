@@ -18,8 +18,10 @@ from researchos.application.real_composition import BoundRealModel
 from researchos.configuration.real_settings import canonicalize_base_endpoint
 from researchos.configuration.validation import (
     PHASE9B_AGENT_RESPONSE_CONTRACT,
+    PHASE9C_AGENT_RESPONSE_CONTRACT,
     Phase9ARealAgentDecision,
     Phase9BRealAgentDecision,
+    Phase9CRealAgentDecision,
     deepseek_prompt_content_hash,
     deepseek_response_contract,
     deepseek_system_prompt,
@@ -55,18 +57,26 @@ def _validate_binding(bound: BoundRealModel, role_id: str) -> None:
         role_id == "agent"
         and settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
     )
+    retrieval_tools = (
+        role_id == "agent"
+        and settings.response_contract_version == PHASE9C_AGENT_RESPONSE_CONTRACT
+    )
     if settings.prompt_content_hash != deepseek_prompt_content_hash(
-        role_id, enable_web_tools=web_tools
+        role_id, enable_web_tools=web_tools, enable_retrieval_tools=retrieval_tools
     ):
         raise RunConfigurationError("DeepSeek prompt content hash differs")
     if settings.response_contract_version != deepseek_response_contract(
-        role_id, enable_web_tools=web_tools
+        role_id, enable_web_tools=web_tools, enable_retrieval_tools=retrieval_tools
     ):
         raise RunConfigurationError("DeepSeek response contract differs")
 
 
 def _messages(
-    role_id: str, request: Any, *, enable_web_tools: bool = False
+    role_id: str,
+    request: Any,
+    *,
+    enable_web_tools: bool = False,
+    enable_retrieval_tools: bool = False,
 ) -> tuple[dict[str, str], ...]:
     content = json.dumps(
         request.model_dump(mode="json"),
@@ -79,7 +89,9 @@ def _messages(
         {
             "role": "system",
             "content": deepseek_system_prompt(
-                role_id, enable_web_tools=enable_web_tools
+                role_id,
+                enable_web_tools=enable_web_tools,
+                enable_retrieval_tools=enable_retrieval_tools,
             ),
         },
         {"role": "user", "content": content},
@@ -156,8 +168,10 @@ class DeepSeekAgent:
         self._transport = transport
         self._authorizer = authorizer
         self._web_tools = (
-            bound.settings.response_contract_version
-            == PHASE9B_AGENT_RESPONSE_CONTRACT
+            bound.settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
+        )
+        self._retrieval_tools = (
+            bound.settings.response_contract_version == PHASE9C_AGENT_RESPONSE_CONTRACT
         )
         self._descriptor = AgentDescriptor(
             agent_id="deepseek_agent",
@@ -181,7 +195,7 @@ class DeepSeekAgent:
     def provider_admission_profile(self) -> ProviderAdmissionProfile:
         return (
             ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
-            if self._web_tools
+            if self._web_tools or self._retrieval_tools
             else ProviderAdmissionProfile.LEGACY_TASK_LIMIT_V1
         )
 
@@ -213,7 +227,12 @@ class DeepSeekAgent:
                 )
         try:
             response = await self._transport.complete_async(
-                _messages("agent", request, enable_web_tools=self._web_tools),
+                _messages(
+                    "agent",
+                    request,
+                    enable_web_tools=self._web_tools,
+                    enable_retrieval_tools=self._retrieval_tools,
+                ),
                 cancellation=cancellation,
                 deadline=request.context.deadline,
             )
@@ -234,7 +253,9 @@ class DeepSeekAgent:
             payload["usage"] = response.usage.model_dump(mode="json")
             payload["usage_certainty"] = response.usage_certainty.value
             contract = (
-                Phase9BRealAgentDecision
+                Phase9CRealAgentDecision
+                if self._retrieval_tools
+                else Phase9BRealAgentDecision
                 if self._web_tools
                 else Phase9ARealAgentDecision
             )
