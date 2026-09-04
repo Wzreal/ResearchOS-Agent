@@ -1048,3 +1048,22 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   UNKNOWN usage on interrupted dispatched work. Retrieval-enabled REAL Agents
   use a distinct v3 Tool response contract; Phase 9A direct v1 and Phase 9B
   web-only v2 contracts remain unchanged.
+
+## ADR-0028: Mirror local trace to optional OTLP without changing authority
+
+- **Status:** Accepted
+- **Date:** 2026-09-04
+- **Decision:** Phase 9D keeps canonical local `TraceSink` persistence as the
+  sole trace authority. A synchronous decorator writes locally first and offers
+  only newly appended descriptors to a bounded, thread-safe dispatcher. The
+  dispatcher owns background exporter execution when enabled; disabled mode
+  owns no worker. Equal `append_once` replays, reconciliation, and local-only
+  diagnostics never re-export. A fixed projection maps only allowlisted event
+  fields and identities to an `ObservationEnvelope`.
+
+  The initial optional backend is OTLP/HTTP protobuf using existing `httpx`
+  and `opentelemetry-proto`, no vendor SDK. It uses direct HTTPS, disabled
+  redirects/environment proxies, bounded time/bytes, and secret-only safe auth
+  headers. Remote failure, timeout, backpressure, and shutdown loss are
+  best-effort diagnostics only and do not affect Run lifecycle, budget, retry,
+  checkpoint, Evidence, or Verification semantics.

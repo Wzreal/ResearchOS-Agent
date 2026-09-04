@@ -185,6 +185,8 @@ not aspiration.
 - DONE — Add one composition-frozen, read-only Zilliz Cloud Free BM25 retrieval
   capability with stored-content hash verification, no embedding provider, and
   Phase 3/5 integration (Phase 9C).
-- TODO — Integrate optional observability backend.
+- DONE — Integrate an optional local-first OTLP/HTTP protobuf observability
+  mirror with synchronous-safe bounded dispatch, deterministic projection,
+  secret-safe transport, and offline tests (Phase 9D).
 - TODO — Complete security, migration, end-to-end, and release gates.
 - TODO — Publish measured results, limitations, costs, and operator runbook.
