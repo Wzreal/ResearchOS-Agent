@@ -1056,8 +1056,8 @@ not silently rewritten. If a decision changes, add a superseding ADR.
 - **Decision:** Phase 9D keeps canonical local `TraceSink` persistence as the
   sole trace authority. A synchronous decorator writes locally first and offers
   only newly appended descriptors to a bounded, thread-safe dispatcher. The
-  dispatcher owns background exporter execution when enabled; disabled mode
-  owns no worker. Equal `append_once` replays, reconciliation, and local-only
+  dispatcher owns one background thread and one asyncio loop when enabled;
+  disabled mode owns no worker. Equal `append_once` replays, reconciliation, and local-only
   diagnostics never re-export. A fixed projection maps only allowlisted event
   fields and identities to an `ObservationEnvelope`.
 

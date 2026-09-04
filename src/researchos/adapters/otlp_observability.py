@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from datetime import UTC
+from typing import Any
 
 from researchos.application.errors import MissingOptionalDependency
 from researchos.configuration.observability import OtlpHttpSettings
@@ -15,7 +17,13 @@ from researchos.interfaces.providers import SecretSource
 class OtlpHttpObservationExporter:
     """Exports one safe envelope as one OTLP span; no retry or redirect."""
 
-    def __init__(self, *, settings: OtlpHttpSettings, secrets: SecretSource) -> None:
+    def __init__(
+        self,
+        *,
+        settings: OtlpHttpSettings,
+        secrets: SecretSource,
+        client_factory: Callable[..., Any] | None = None,
+    ) -> None:
         try:
             import httpx
             from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
@@ -40,7 +48,7 @@ class OtlpHttpObservationExporter:
             self._validate_secret(value)
             headers[settings.auth_header_name] = value
         self._headers = headers
-        self._client = httpx.AsyncClient(
+        self._client = (client_factory or httpx.AsyncClient)(
             follow_redirects=False,
             trust_env=False,
             timeout=httpx.Timeout(
@@ -65,6 +73,14 @@ class OtlpHttpObservationExporter:
     def _digest(value: str, length: int) -> bytes:
         return hashlib.sha256(value.encode("utf-8")).digest()[:length]
 
+    @classmethod
+    def _span_id(cls, event_id: str) -> bytes:
+        return cls._digest("span:" + event_id, 8)
+
+    @classmethod
+    def _trace_id(cls, run_id: str) -> bytes:
+        return cls._digest("trace:" + run_id, 16)
+
     def _payload(self, envelope: ObservationEnvelope) -> bytes:
         descriptor = envelope.descriptor
         timestamp = descriptor.timestamp.astimezone(UTC)
@@ -76,6 +92,41 @@ class OtlpHttpObservationExporter:
             "researchos.revision": str(descriptor.revision),
             "researchos.scope": envelope.scope.value,
         }
+        fixed = {
+            "transition_id": descriptor.transition_id,
+            "correlation_id": descriptor.correlation_id,
+            "causation_id": descriptor.causation_id,
+            "previous_status": (
+                descriptor.previous_status.value
+                if descriptor.previous_status is not None
+                else None
+            ),
+            "next_status": (
+                descriptor.next_status.value
+                if descriptor.next_status is not None
+                else None
+            ),
+            "duration_ms": descriptor.duration_ms,
+        }
+        for key, value in fixed.items():
+            if value is not None:
+                attrs[f"researchos.{key}"] = str(value)
+        if descriptor.budget_delta is not None:
+            for key in (
+                "elapsed_milliseconds",
+                "tokens",
+                "cost_microunits",
+                "tool_calls",
+            ):
+                attrs[f"researchos.budget_delta.{key}"] = str(
+                    getattr(descriptor.budget_delta, key)
+                )
+        if descriptor.error is not None:
+            attrs["researchos.error.code"] = descriptor.error.code
+            attrs["researchos.error.category"] = descriptor.error.category.value
+            attrs["researchos.error.retryable"] = str(
+                descriptor.error.retryable
+            ).lower()
         for key in (
             "task_id",
             "attempt_id",
@@ -96,16 +147,17 @@ class OtlpHttpObservationExporter:
             for key, value in sorted(attrs.items())
         ]
         span = self._trace_pb2.Span(
-            trace_id=self._digest("trace:" + descriptor.run_id, 16),
-            span_id=self._digest("span:" + descriptor.event_id, 8),
+            trace_id=self._trace_id(descriptor.run_id),
+            span_id=self._span_id(descriptor.event_id),
             parent_span_id=(
-                self._digest("parent:" + descriptor.causation_id, 8)
+                self._span_id(descriptor.causation_id)
                 if descriptor.causation_id
                 else b""
             ),
             name=descriptor.event_type.value,
             start_time_unix_nano=nanos,
             end_time_unix_nano=nanos,
+            kind=self._trace_pb2.Span.SPAN_KIND_INTERNAL,
             attributes=key_values,
         )
         request = self._trace_service_pb2.ExportTraceServiceRequest(
@@ -116,9 +168,13 @@ class OtlpHttpObservationExporter:
                             self._common_pb2.KeyValue(
                                 key="service.name",
                                 value=self._common_pb2.AnyValue(
-                                    string_value="researchos"
+                                    string_value="researchos-agent"
                                 ),
-                            )
+                            ),
+                            self._common_pb2.KeyValue(
+                                key="researchos.exporter.schema_version",
+                                value=self._common_pb2.AnyValue(string_value="v1"),
+                            ),
                         ]
                     ),
                     scope_spans=[self._trace_pb2.ScopeSpans(spans=[span])],

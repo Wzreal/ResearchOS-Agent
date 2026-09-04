@@ -84,11 +84,9 @@ def load_otlp_http_settings(
     if not endpoint:
         return None
     header_name = values.get("RESEARCHOS_OTLP_AUTH_HEADER_NAME", "").strip() or None
-    if (
-        header_name is not None
-        and not values.get("RESEARCHOS_OTLP_AUTH_HEADER_VALUE", "").strip()
-    ):
-        raise ValueError("required OTLP credential is absent")
+    header_value = values.get("RESEARCHOS_OTLP_AUTH_HEADER_VALUE", "").strip() or None
+    if (header_name is None) != (header_value is None):
+        raise ValueError("OTLP auth header name and value are required together")
     return OtlpHttpSettings(
         traces_endpoint=endpoint,
         auth_header_name=header_name,

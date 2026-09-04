@@ -7,10 +7,12 @@ from researchos.application.observation_recorder import (
     ExporterDispatcher,
     ObservationRecorder,
 )
+from researchos.configuration.observability import OtlpHttpSettings
 from researchos.domain.contracts import TraceEvent
 from researchos.domain.observability import AppendOnceResult, ExporterPolicy
 from researchos.domain.runtime import TraceEventDescriptor
 from researchos.interfaces.lifecycle import Clock, TraceSink
+from researchos.interfaces.providers import SecretSource
 from researchos.interfaces.verification import ObservationExporter
 
 
@@ -75,3 +77,26 @@ class ObservabilityRuntime:
     async def close(self, *, drain: bool = False) -> None:
         if self.dispatcher is not None:
             await self.dispatcher.close(drain=drain)
+
+
+def build_optional_observability_runtime(
+    *,
+    local_trace: TraceSink,
+    clock: Clock,
+    settings: OtlpHttpSettings | None,
+    secrets: SecretSource,
+    policy: ExporterPolicy | None = None,
+) -> ObservabilityRuntime:
+    """Wire optional environment settings without adding a trace authority."""
+
+    if settings is None:
+        return ObservabilityRuntime(local_trace=local_trace, clock=clock, policy=policy)
+    # Import only when configured, preserving core/disabled optional isolation.
+    from researchos.adapters.otlp_observability import OtlpHttpObservationExporter
+
+    return ObservabilityRuntime(
+        local_trace=local_trace,
+        clock=clock,
+        exporters=(OtlpHttpObservationExporter(settings=settings, secrets=secrets),),
+        policy=policy,
+    )
