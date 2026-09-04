@@ -7,6 +7,8 @@ import sys
 import pytest
 from phase9_fixtures import make_settings
 
+import researchos.application.doctor as doctor_module
+from researchos.application.doctor import DoctorCheckStatus, RealDoctor
 from researchos.configuration.environment import (
     EnvironmentSecretSource,
     load_real_integration_settings,
@@ -17,6 +19,10 @@ from researchos.configuration.real_settings import (
     canonicalize_base_endpoint,
     deepseek_pricing_safety_profile,
     default_deepseek_policy,
+)
+from researchos.configuration.validation import (
+    deepseek_prompt_content_hash,
+    deepseek_response_contract,
 )
 from researchos.domain.identity import stable_hash
 from researchos.domain.real_composition import DeepSeekPricingUpperBoundProfile
@@ -51,6 +57,24 @@ def _environment() -> dict[str, str]:
         "RESEARCHOS_DEEPSEEK_AGENT_REASONING_EFFORT": "high",
         "RESEARCHOS_DEEPSEEK_VERIFICATION_REASONING_EFFORT": "high",
     }
+
+
+def _managed_retrieval_environment() -> dict[str, str]:
+    environment = _environment()
+    environment.update(
+        {
+            "RESEARCHOS_REAL_CAPABILITIES": "managed_retrieval",
+            "RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS": "90000",
+            "RESEARCHOS_ZILLIZ_ENDPOINT": (
+                "https://cluster-a.serverless.aws-us-east-1.vectordb.zillizcloud.com/"
+            ),
+            "RESEARCHOS_ZILLIZ_COLLECTION_ID": "research_docs",
+            "RESEARCHOS_ZILLIZ_FREE_PLAN_AUTHORITY_ID": (
+                "operator_provisioned_free_plan_v1"
+            ),
+        }
+    )
+    return environment
 
 
 def test_canonical_base_endpoint_includes_semantic_path() -> None:
@@ -145,6 +169,86 @@ def test_environment_loader_resolves_exact_phase9b_capabilities() -> None:
     search = settings.capability_for_id("web_search")
     assert search.provider_reservation.cost_microunits == 125_000
     assert search.pin() in settings.capabilities
+    agent = settings.model_for_role("agent")
+    assert agent.response_contract_version == "agent-tool-decision-v2"
+
+
+def test_environment_loader_constructs_attested_managed_retrieval_v3() -> None:
+    settings = load_real_integration_settings(_managed_retrieval_environment())
+    retrieval = settings.capability_for_id("managed_retrieval")
+    assert retrieval.retrieval_policy is not None
+    assert retrieval.retrieval_policy.free_plan_attestation.authority_id == (
+        "operator_provisioned_free_plan_v1"
+    )
+    assert settings.model_for_role("agent").response_contract_version == (
+        "agent-tool-decision-v3"
+    )
+    assert settings.model_for_role("agent").prompt_content_hash == (
+        deepseek_prompt_content_hash("agent", enable_retrieval_tools=True)
+    )
+    assert settings.model_for_role("agent").response_contract_version == (
+        deepseek_response_contract("agent", enable_retrieval_tools=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "RESEARCHOS_ZILLIZ_ENDPOINT",
+        "RESEARCHOS_ZILLIZ_COLLECTION_ID",
+        "RESEARCHOS_ZILLIZ_FREE_PLAN_AUTHORITY_ID",
+    ],
+)
+def test_managed_retrieval_environment_fails_closed_without_required_setting(
+    key: str,
+) -> None:
+    environment = _managed_retrieval_environment()
+    del environment[key]
+    with pytest.raises(ValueError, match=f"required REAL setting is absent: {key}"):
+        load_real_integration_settings(environment)
+
+
+def test_environment_loader_without_real_tools_keeps_agent_v1() -> None:
+    settings = load_real_integration_settings(_environment())
+    assert settings.model_for_role("agent").response_contract_version == (
+        "agent-direct-decision-v1"
+    )
+
+
+def test_doctor_checks_zilliz_credential_and_pymilvus_for_managed_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_modules: list[str] = []
+
+    def find_spec(name: str):
+        checked_modules.append(name)
+        return object()
+
+    monkeypatch.setattr(doctor_module, "find_spec", find_spec)
+    class RecordingSecrets(EnvironmentSecretSource):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "RESEARCHOS_DEEPSEEK_API_KEY": "deepseek-token",
+                    "RESEARCHOS_ZILLIZ_TOKEN": "z-token",
+                }
+            )
+            self.lookups: list[str] = []
+
+        def get_secret(self, secret_id: str) -> str | None:
+            self.lookups.append(secret_id)
+            return super().get_secret(secret_id)
+
+    secrets = RecordingSecrets()
+    report = RealDoctor(
+        settings=load_real_integration_settings(_managed_retrieval_environment()),
+        secrets=secrets,
+    ).run()
+    assert "pymilvus" in checked_modules
+    assert next(
+        check for check in report.checks if check.check_id == "secret_presence"
+    ).status is DoctorCheckStatus.PASS
+    assert "researchos_zilliz_token" in secrets.lookups
 
 
 def test_environment_loader_rejects_unknown_real_capability() -> None:

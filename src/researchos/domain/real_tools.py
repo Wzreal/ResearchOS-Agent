@@ -10,7 +10,12 @@ from researchos.domain.agent import AgentToolCall, AgentToolDecision
 from researchos.domain.contracts import ContractModel, SafeId, Sha256, model_sha256
 from researchos.domain.identity import stable_hash
 from researchos.domain.planning import ResearchTask
-from researchos.domain.tools import BrowserRequest, SearchRequest, ToolInvocationRequest
+from researchos.domain.tools import (
+    BrowserRequest,
+    LocalRetrievalRequest,
+    SearchRequest,
+    ToolInvocationRequest,
+)
 
 
 class RealWebAgentToolCall(AgentToolCall):
@@ -29,6 +34,31 @@ class RealWebAgentToolCall(AgentToolCall):
 
 class RealWebAgentToolDecision(AgentToolDecision):
     tool_call: RealWebAgentToolCall
+
+
+class RealPhase9CAgentToolCall(AgentToolCall):
+    capability_id: Literal["web_browser", "web_search", "managed_retrieval"]
+    input: Annotated[
+        SearchRequest | BrowserRequest | LocalRetrievalRequest,
+        Field(discriminator="input_type"),
+    ]
+
+    @model_validator(mode="after")
+    def capability_matches_input(self) -> RealPhase9CAgentToolCall:
+        expected = (
+            "web_search"
+            if isinstance(self.input, SearchRequest)
+            else "web_browser"
+            if isinstance(self.input, BrowserRequest)
+            else "managed_retrieval"
+        )
+        if self.capability_id != expected:
+            raise ValueError("REAL capability differs from Tool input")
+        return self
+
+
+class RealPhase9CAgentToolDecision(AgentToolDecision):
+    tool_call: RealPhase9CAgentToolCall
 
 
 class CapabilityDispatchContext(ContractModel):

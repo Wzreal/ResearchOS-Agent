@@ -10,12 +10,14 @@ from researchos.configuration.real_settings import (
     RealModelSettings,
     default_browser_capability,
     default_deepseek_policy,
+    default_managed_retrieval_capability,
     default_tavily_capability,
 )
 from researchos.configuration.validation import (
     deepseek_prompt_content_hash,
     deepseek_response_contract,
 )
+from researchos.domain.retrieval import ZillizFreePlanAttestation
 
 
 class EnvironmentSecretSource:
@@ -53,7 +55,7 @@ def load_real_integration_settings(
             if item.strip()
         )
     )
-    unsupported = set(enabled) - {"web_browser", "web_search"}
+    unsupported = set(enabled) - {"managed_retrieval", "web_browser", "web_search"}
     if unsupported:
         raise ValueError("unsupported REAL capability configuration")
     capability_settings = tuple(
@@ -67,13 +69,29 @@ def load_real_integration_settings(
             )
             if "web_search" in enabled
             else None,
+            default_managed_retrieval_capability(
+                endpoint=required("RESEARCHOS_ZILLIZ_ENDPOINT"),
+                collection_id=required("RESEARCHOS_ZILLIZ_COLLECTION_ID"),
+                free_plan_attestation=ZillizFreePlanAttestation.operator_provisioned(
+                    required("RESEARCHOS_ZILLIZ_FREE_PLAN_AUTHORITY_ID")
+                ),
+            )
+            if "managed_retrieval" in enabled
+            else None,
         )
         if item is not None
     )
     capability_settings = tuple(
         sorted(capability_settings, key=lambda item: item.capability_id)
     )
-    enable_web_tools = bool(capability_settings)
+    enable_web_tools = any(
+        item.capability_id in {"web_browser", "web_search"}
+        for item in capability_settings
+    )
+    enable_retrieval_tools = any(
+        item.capability_id == "managed_retrieval" for item in capability_settings
+    )
+    enable_agent_tool_calls = enable_web_tools or enable_retrieval_tools
     models: list[RealModelSettings] = []
     for role in ("agent", "planning", "verification"):
         model_id = required(f"RESEARCHOS_DEEPSEEK_{role.upper()}_MODEL")
@@ -108,7 +126,7 @@ def load_real_integration_settings(
                 temperature=required("RESEARCHOS_TEMPERATURE"),
                 top_p=required("RESEARCHOS_TOP_P"),
             )
-        if role == "agent" and enable_web_tools:
+        if role == "agent" and enable_agent_tool_calls:
             policy_overrides["provider_total_call_timeout_ms"] = int(
                 required("RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS")
             )
@@ -130,10 +148,18 @@ def load_real_integration_settings(
                 base_endpoint=endpoint,
                 prompt_schema_version="deepseek-prompt-v1",
                 prompt_content_hash=deepseek_prompt_content_hash(
-                    role, enable_web_tools=(role == "agent" and enable_web_tools)
+                    role,
+                    enable_web_tools=(role == "agent" and enable_web_tools),
+                    enable_retrieval_tools=(
+                        role == "agent" and enable_retrieval_tools
+                    ),
                 ),
                 response_contract_version=deepseek_response_contract(
-                    role, enable_web_tools=(role == "agent" and enable_web_tools)
+                    role,
+                    enable_web_tools=(role == "agent" and enable_web_tools),
+                    enable_retrieval_tools=(
+                        role == "agent" and enable_retrieval_tools
+                    ),
                 ),
                 policy=policy,
                 credential_slot_id=credential_slot_id,

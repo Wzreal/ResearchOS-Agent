@@ -182,7 +182,9 @@ not aspiration.
 - DONE — Freeze Browser special-use address semantics independently of Python
   runtime classification, and bind web-Agent total provider-call timeout to
   composition, reservation, and enforced transport behavior.
-- TODO — Integrate selected retrieval providers (Phase 9C).
+- DONE — Add one composition-frozen, read-only Zilliz Cloud Free BM25 retrieval
+  capability with stored-content hash verification, no embedding provider, and
+  Phase 3/5 integration (Phase 9C).
 - TODO — Integrate optional observability backend.
 - TODO — Complete security, migration, end-to-end, and release gates.
 - TODO — Publish measured results, limitations, costs, and operator runbook.

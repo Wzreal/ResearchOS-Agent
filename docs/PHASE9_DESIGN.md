@@ -1,12 +1,35 @@
-# Phase 9 Design — Phase 9A and 9B Implemented Boundary
+# Phase 9 Design — Phase 9A, 9B, and 9C Implemented Boundary
 
 ## Scope
 
 Phase 9A adds safe REAL LLM composition and DeepSeek adapters. Phase 9B adds
 composition-frozen Tavily Search and a bounded HTTP Browser without changing
-Phase 1-8 authority schemas. Playwright, embeddings, Milvus, hybrid retrieval,
+Phase 1-8 authority schemas. Phase 9C adds bounded Zilliz BM25 retrieval.
+Playwright, embeddings, hybrid retrieval,
 Langfuse, Claim Extraction, workflow coordination, real E2E, and benchmark
 results are not implemented.
+
+## Phase 9C retrieval boundary
+
+Phase 9C adds only Zilliz Cloud Free-plan BM25 retrieval. It uses
+the existing Local Retrieval request/result contracts, but queries one
+operator-provisioned read-only collection through exactly one search RPC. The
+endpoint must be canonical `https://<cluster>.serverless.<region>.vectordb.zillizcloud.com/`;
+arbitrary Milvus, private, global, on-demand, Dedicated and explicit-port
+endpoints fail before credential lookup. This hostname proves only the shared
+Free-or-Serverless endpoint family, never a Free plan. A zero-cost reservation
+requires an immutable operator-provisioned Free-plan attestation frozen into
+the retrieval policy and REAL composition hash; missing or non-Free authority
+fails closed. All billable/variable profiles are unsupported rather than
+represented by an operator estimate.
+
+The frozen collection schema includes document/chunk IDs, locator, content,
+stored content SHA-256 and bounded safe metadata. The adapter recomputes the
+returned UTF-8 content hash and rejects a mismatch before constructing a
+LocalRetrievalResult or permitting Phase 5 Evidence ingestion. No schema
+inspection RPC, collection mutation, embedding, dense/hybrid retrieval or
+reranking is performed. A retrieval-enabled Agent receives a new v3 tool
+response contract; Phase 9A direct v1 and Phase 9B web-only v2 remain frozen.
 
 ## Composition authority
 

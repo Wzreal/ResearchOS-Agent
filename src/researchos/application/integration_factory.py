@@ -18,6 +18,10 @@ from researchos.adapters.deepseek import (
 )
 from researchos.adapters.openai_compatible import OpenAICompatibleChatTransport
 from researchos.adapters.tavily import HttpxTavilyTransport, TavilySearchTool
+from researchos.adapters.zilliz_retrieval import (
+    PymilvusZillizBm25Transport,
+    ZillizBm25RetrievalTool,
+)
 from researchos.application.capability_registry import CapabilityRegistry
 from researchos.application.errors import RunConfigurationError
 from researchos.application.provider_dispatch import RunLifecycleDispatchAuthorizer
@@ -145,6 +149,14 @@ class RealIntegrationFactory:
                             address_policy=policy.address_policy,
                         ),
                         extractor=TrafilaturaSubprocessExtractor(),
+                        clock=SystemClock(),
+                    )
+                elif capability_id == "managed_retrieval":
+                    tool = ZillizBm25RetrievalTool(
+                        bound=bound,
+                        authorizer=tool_authorizer,
+                        compositions=self._manager,
+                        transport=PymilvusZillizBm25Transport(),
                         clock=SystemClock(),
                     )
                 else:  # pragma: no cover - settings validation is closed-world
