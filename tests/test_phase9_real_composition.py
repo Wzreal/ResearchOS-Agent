@@ -503,11 +503,6 @@ def test_missing_credential_does_not_block_safe_terminal_mutation() -> None:
         make_settings(
             role_overrides={"planning": {"prompt_content_hash": "f" * 64}}
         ),
-        make_settings(
-            role_overrides={
-                "planning": {"base_endpoint": "https://api.deepseek.com/v2"}
-            }
-        ),
         make_settings(policy_overrides={"read_timeout_ms": 60_001}),
         make_settings(
             role_overrides={

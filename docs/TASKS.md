@@ -188,5 +188,8 @@ not aspiration.
 - DONE — Integrate an optional local-first OTLP/HTTP protobuf observability
   mirror with synchronous-safe bounded dispatch, deterministic projection,
   secret-safe transport, and offline tests (Phase 9D).
-- TODO — Complete security, migration, end-to-end, and release gates.
+- DONE — Complete security, migration, end-to-end, and release gates: canonical
+  DeepSeek public-origin admission, frozen schema-v1 compatibility corpus,
+  deterministic filesystem lifecycle E2E, wheel-install CI, and an isolated
+  operator-only REAL smoke workflow.
 - TODO — Publish measured results, limitations, costs, and operator runbook.

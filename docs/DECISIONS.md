@@ -1067,3 +1067,34 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   headers. Remote failure, timeout, backpressure, and shutdown loss are
   best-effort diagnostics only and do not affect Run lifecycle, budget, retry,
   checkpoint, Evidence, or Verification semantics.
+
+## ADR-0029: Release gates preserve existing authority and isolate paid smoke
+
+- **Status:** Accepted
+- **Date:** 2026-09-04
+- **Decision:** The production release profile permits the canonical public
+  DeepSeek origin only: `https://api.deepseek.com`. This rejects credentialed
+  traffic to arbitrary endpoints before transport construction. Existing
+  persistence remains schema v1, so a migration framework is not introduced.
+  Instead, checked-in byte-frozen v1 fixtures establish a compatibility
+  baseline: fresh filesystem adapters must load canonical known artifacts and
+  fail closed for unknown, missing, tampered, or torn artifacts. Pytest and CI
+  never regenerate that corpus.
+
+  A deterministic offline filesystem E2E must use the legal RunManager path
+  `CREATED -> PLANNING -> READY -> RUNNING -> VERIFYING -> EVALUATING ->
+  COMPLETED`; it neither writes state directly nor lets evaluation mutate a
+  Run. Core CI, all-extras offline CI, security/compatibility/E2E tests, lint,
+  diff checking, and wheel installability are automated release gates.
+
+  A paid REAL smoke test is deliberately separate, marker-gated, and triggered
+  only by `workflow_dispatch`. Its job has `contents: read`, is bound to the
+  fixed `researchos-real-smoke` GitHub Environment, requires an explicit
+  acknowledgement, and only runs for `refs/heads/main`.
+  It checks out the event SHA rather than a user text input. GitHub Environment
+  reviewers and deployment branch restrictions cannot be proven by workflow
+  source, and are an operator release prerequisite.
+- **Consequences:** Normal CI never makes paid calls and a feature branch
+  cannot receive smoke credentials through this workflow. There is no claim of
+  migration support for unknown historical schemas, no broad custom-endpoint
+  support, and no measured-result/operator-runbook claim in this phase.

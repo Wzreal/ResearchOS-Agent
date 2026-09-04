@@ -50,6 +50,7 @@ from researchos.domain.web import (
 
 REAL_SETTINGS_SCHEMA_VERSION = 1
 DEEPSEEK_PRICING_SAFETY_PROFILE_VERSION = "deepseek-pricing-safety-2026-09-v2"
+DEEPSEEK_PUBLIC_ORIGIN = "https://api.deepseek.com/"
 
 
 _DEEPSEEK_PRICING_SAFETY_PROFILES = {
@@ -127,6 +128,23 @@ def base_endpoint_hash(value: str) -> str:
     return hashlib.sha256(canonicalize_base_endpoint(value).encode()).hexdigest()
 
 
+def canonicalize_deepseek_public_endpoint(value: str) -> str:
+    """Return the sole supported public DeepSeek origin.
+
+    REAL adapter settings are operator-provisioned, but an arbitrary endpoint
+    would turn a credential-bearing model adapter into an SSRF/proxy surface.
+    The release profile intentionally supports only DeepSeek's canonical public
+    API origin; custom gateways require a future explicit integration.
+    """
+
+    canonical = canonicalize_base_endpoint(value)
+    if not canonical.startswith("https://"):
+        raise ValueError("DeepSeek base endpoint must use HTTPS")
+    if canonical != DEEPSEEK_PUBLIC_ORIGIN:
+        raise ValueError("DeepSeek endpoint must be the canonical public origin")
+    return canonical
+
+
 class RealModelSettings(ContractModel):
     role_id: SafeId
     provider_id: Literal["deepseek"] = "deepseek"
@@ -148,10 +166,7 @@ class RealModelSettings(ContractModel):
     @field_validator("base_endpoint")
     @classmethod
     def endpoint_is_canonicalizable(cls, value: str) -> str:
-        canonical = canonicalize_base_endpoint(value)
-        if not canonical.startswith("https://"):
-            raise ValueError("DeepSeek base endpoint must use HTTPS")
-        return value
+        return canonicalize_deepseek_public_endpoint(value)
 
     @model_validator(mode="after")
     def policy_matches_model(self) -> RealModelSettings:

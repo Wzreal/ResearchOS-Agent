@@ -3,11 +3,11 @@
 ResearchOS Agent is a recoverable, verifiable multi-agent system for
 complex, long-running deep-research tasks.
 
-The project has completed Phases 0-8 and Phase 9A. It includes durable planning
+The project has completed Phases 0-8 and Phase 9A-9D plus release gates. It includes durable planning
 and DAG execution, Agent/Tool adapters, Evidence and Claim authorities, bounded
 verification, evaluation, resilience hardening, and an immutable REAL provider
 composition boundary with DeepSeek Planning/Agent/Verification adapters.
-Phase 9B-9E integrations and real E2E measurements remain pending.
+The final Phase 9 measured-results and operator-runbook publication remains pending.
 
 ## Technical direction
 
@@ -34,6 +34,12 @@ uv sync
 uv run pytest
 uv run ruff check .
 ```
+
+The normal test suite is offline and cannot make paid provider calls. The
+separate `REAL smoke` GitHub workflow is manual-only, accepts only `main`,
+requires an explicit paid-call acknowledgement, and runs in
+the protected `researchos-real-smoke` Environment. Environment reviewers and
+deployment-branch protection remain repository operator prerequisites.
 
 ## Import
 
