@@ -131,6 +131,39 @@ class ProviderCallReservation(ContractModel):
         return self
 
 
+class ProviderSuboperationReservation(ContractModel):
+    """Immutable upper bound used for local sub-operation admission only."""
+
+    schema_version: Literal[1] = 1
+    reservation_version: Annotated[str, StringConstraints(min_length=1, max_length=80)]
+    duration_milliseconds: int = Field(ge=0, le=3_600_000)
+    tokens: int = Field(ge=0, le=10_000_000)
+    cost_microunits: int = Field(ge=0)
+    cost_currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
+    tool_calls: int = Field(ge=0, le=1_000)
+    pricing_policy_id: SafeId
+    pricing_policy_version: Annotated[
+        str, StringConstraints(min_length=1, max_length=80)
+    ]
+    pricing_rules_hash: Sha256
+    reservation_hash: Sha256
+
+    @model_validator(mode="after")
+    def identity_is_valid(self) -> ProviderSuboperationReservation:
+        if self.reservation_hash != self.compute_hash():
+            raise ValueError("provider sub-operation reservation hash differs")
+        return self
+
+    def compute_hash(self) -> str:
+        return stable_hash(self.model_dump(mode="json", exclude={"reservation_hash"}))
+
+    @classmethod
+    def build(cls, **values: object) -> ProviderSuboperationReservation:
+        candidate = cls.model_construct(**values, reservation_hash="0" * 64)
+        payload = candidate.model_dump(mode="json", exclude={"reservation_hash"})
+        return cls.model_validate({**payload, "reservation_hash": stable_hash(payload)})
+
+
 def _validate_decimal(value: str, *, minimum: Decimal, maximum: Decimal) -> str:
     try:
         parsed = Decimal(value)
@@ -195,6 +228,7 @@ class ModelCallPolicySnapshot(ContractModel):
     read_timeout_ms: int = Field(gt=0, le=3_600_000)
     write_timeout_ms: int = Field(gt=0, le=3_600_000)
     pool_timeout_ms: int = Field(gt=0, le=3_600_000)
+    provider_total_call_timeout_ms: int | None = Field(default=None, gt=0, le=3_600_000)
     cost_currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
     max_cost_microunits_per_call: int = Field(gt=0)
     pricing_policy_id: SafeId
@@ -304,7 +338,11 @@ class ModelCallPolicySnapshot(ContractModel):
         return self
 
     def hash_preimage(self) -> dict[str, object]:
-        return self.model_dump(mode="json", exclude={"model_call_policy_hash"})
+        excluded = {"model_call_policy_hash"}
+        if self.provider_total_call_timeout_ms is None:
+            # Preserve the Phase 9A direct-profile hash preimage.
+            excluded.add("provider_total_call_timeout_ms")
+        return self.model_dump(mode="json", exclude=excluded)
 
     def compute_hash(self) -> str:
         return stable_hash(self.hash_preimage())
@@ -375,9 +413,7 @@ class ModelCallPolicySnapshot(ContractModel):
             **values,
             model_call_policy_hash="0" * 64,
         )
-        payload = candidate.model_dump(
-            mode="json", exclude={"model_call_policy_hash"}
-        )
+        payload = candidate.hash_preimage()
         return cls.model_validate(
             {**payload, "model_call_policy_hash": stable_hash(payload)}
         )
@@ -438,7 +474,14 @@ class ModelBundleSnapshot(ContractModel):
 class CapabilityCompositionPin(ContractModel):
     capability_id: SafeId
     adapter_id: SafeId
+    adapter_version: Annotated[str, StringConstraints(min_length=1, max_length=80)]
     operation_version: Annotated[str, StringConstraints(min_length=1, max_length=80)]
+    policy_schema_version: Annotated[
+        str, StringConstraints(min_length=1, max_length=80)
+    ]
+    policy_hash: Sha256
+    descriptor_hash: Sha256
+    provider_reservation_hash: Sha256
     tool_id: SafeId | None = None
 
 

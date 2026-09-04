@@ -5,6 +5,7 @@ from phase9_fixtures import make_settings
 
 from researchos.application.doctor import DoctorCheckStatus, RealDoctor
 from researchos.application.errors import RunConfigurationError
+from researchos.configuration.real_settings import default_tavily_capability
 
 
 class RecordingSecrets:
@@ -28,6 +29,18 @@ def test_doctor_default_makes_zero_paid_calls_and_writes() -> None:
         for check in default.checks
     )
     assert "doctor-secret-canary" not in default.model_dump_json()
+
+
+def test_doctor_checks_real_capability_secret_without_remote_call() -> None:
+    secrets = RecordingSecrets("doctor-secret-canary")
+    settings = make_settings(
+        capability_settings=(default_tavily_capability(),)
+    )
+    report = RealDoctor(settings=settings, secrets=secrets).run()
+    assert "researchos_tavily_api_key" in secrets.lookups
+    assert report.paid_calls == 0
+    assert report.remote_writes == 0
+    assert "doctor-secret-canary" not in report.model_dump_json()
 
 
 def test_unimplemented_paid_or_write_probe_fails_explicitly() -> None:

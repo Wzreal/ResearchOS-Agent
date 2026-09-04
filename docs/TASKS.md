@@ -173,7 +173,16 @@ not aspiration.
 - DONE — Correct DeepSeek V4 reservation safety data to the reviewed 1M context,
   pin the 384K output maximum and USD billing currency, and reject currency or
   model-limit drift before dispatch.
-- TODO — Integrate selected browser/search and retrieval providers.
+- DONE — Implement Phase 9B REAL Tavily Search and bounded HTTP Browser behind
+  run-bound capability composition, immediate dispatch authorization, repeated
+  provider-reservation admission, and deterministic offline tests.
+- DONE — Add Phase 9B SearchResult v2 provenance semantics, metadata-to-zero-
+  Evidence enforcement, pinned DNS/peer Browser transport, manual redirects,
+  bounded subprocess extraction, and zero-cost doctor checks.
+- DONE — Freeze Browser special-use address semantics independently of Python
+  runtime classification, and bind web-Agent total provider-call timeout to
+  composition, reservation, and enforced transport behavior.
+- TODO — Integrate selected retrieval providers (Phase 9C).
 - TODO — Integrate optional observability backend.
 - TODO — Complete security, migration, end-to-end, and release gates.
 - TODO — Publish measured results, limitations, costs, and operator runbook.

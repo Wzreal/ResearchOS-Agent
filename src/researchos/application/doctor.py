@@ -1,9 +1,10 @@
-"""Zero-cost, read-only Phase 9A REAL configuration diagnostics."""
+"""Zero-cost, read-only Phase 9 REAL configuration diagnostics."""
 
 from __future__ import annotations
 
 import json
 from enum import StrEnum
+from importlib.util import find_spec
 from typing import Literal
 
 from pydantic import Field
@@ -56,7 +57,7 @@ class RealDoctor:
     ) -> DoctorReport:
         if probe_paid or probe_writes:
             raise RunConfigurationError(
-                "paid/write doctor probes are not implemented in Phase 9A"
+                "paid/write doctor probes are not implemented in Phase 9B"
             )
         checks: list[DoctorCheck] = [
             DoctorCheck(
@@ -66,7 +67,14 @@ class RealDoctor:
             )
         ]
         secret_ids = tuple(
-            sorted({item.credential_slot_id for item in self._settings.models})
+            sorted(
+                {item.credential_slot_id for item in self._settings.models}
+                | {
+                    item.credential_slot_id
+                    for item in self._settings.capability_settings
+                    if item.credential_slot_id is not None
+                }
+            )
         )
         secrets = tuple(self._secrets.get_secret(secret_id) for secret_id in secret_ids)
         secrets_valid = all(
@@ -84,6 +92,28 @@ class RealDoctor:
                     "secrets_present"
                     if secrets_valid
                     else "secret_missing"
+                ),
+            )
+        )
+        required_modules = {"httpx"}
+        if any(
+            item.capability_id == "web_browser"
+            for item in self._settings.capability_settings
+        ):
+            required_modules.add("trafilatura")
+        extras_valid = all(find_spec(name) is not None for name in required_modules)
+        checks.append(
+            DoctorCheck(
+                check_id="optional_dependencies",
+                status=(
+                    DoctorCheckStatus.PASS
+                    if extras_valid
+                    else DoctorCheckStatus.FAIL
+                ),
+                code=(
+                    "optional_dependencies_present"
+                    if extras_valid
+                    else "optional_dependency_missing"
                 ),
             )
         )

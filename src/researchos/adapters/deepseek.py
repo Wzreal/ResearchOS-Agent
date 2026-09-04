@@ -17,9 +17,11 @@ from researchos.application.errors import (
 from researchos.application.real_composition import BoundRealModel
 from researchos.configuration.real_settings import canonicalize_base_endpoint
 from researchos.configuration.validation import (
-    DEEPSEEK_RESPONSE_CONTRACTS,
+    PHASE9B_AGENT_RESPONSE_CONTRACT,
     Phase9ARealAgentDecision,
+    Phase9BRealAgentDecision,
     deepseek_prompt_content_hash,
+    deepseek_response_contract,
     deepseek_system_prompt,
 )
 from researchos.domain.agent import (
@@ -36,7 +38,10 @@ from researchos.domain.synthesis import (
     VerificationModelResponse,
 )
 from researchos.domain.tools import AdapterMode
-from researchos.interfaces.providers import ProviderDispatchAuthorizer
+from researchos.interfaces.providers import (
+    ProviderAdmissionProfile,
+    ProviderDispatchAuthorizer,
+)
 from researchos.interfaces.runtime import CancellationSignal
 
 
@@ -46,13 +51,23 @@ def _validate_binding(bound: BoundRealModel, role_id: str) -> None:
         raise RunConfigurationError("DeepSeek adapter binding role/provider differs")
     if not canonicalize_base_endpoint(settings.base_endpoint).startswith("https://"):
         raise RunConfigurationError("DeepSeek base endpoint must use HTTPS")
-    if settings.prompt_content_hash != deepseek_prompt_content_hash(role_id):
+    web_tools = (
+        role_id == "agent"
+        and settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
+    )
+    if settings.prompt_content_hash != deepseek_prompt_content_hash(
+        role_id, enable_web_tools=web_tools
+    ):
         raise RunConfigurationError("DeepSeek prompt content hash differs")
-    if settings.response_contract_version != DEEPSEEK_RESPONSE_CONTRACTS[role_id]:
+    if settings.response_contract_version != deepseek_response_contract(
+        role_id, enable_web_tools=web_tools
+    ):
         raise RunConfigurationError("DeepSeek response contract differs")
 
 
-def _messages(role_id: str, request: Any) -> tuple[dict[str, str], ...]:
+def _messages(
+    role_id: str, request: Any, *, enable_web_tools: bool = False
+) -> tuple[dict[str, str], ...]:
     content = json.dumps(
         request.model_dump(mode="json"),
         ensure_ascii=False,
@@ -61,7 +76,12 @@ def _messages(role_id: str, request: Any) -> tuple[dict[str, str], ...]:
         separators=(",", ":"),
     )
     return (
-        {"role": "system", "content": deepseek_system_prompt(role_id)},
+        {
+            "role": "system",
+            "content": deepseek_system_prompt(
+                role_id, enable_web_tools=enable_web_tools
+            ),
+        },
         {"role": "user", "content": content},
     )
 
@@ -135,6 +155,10 @@ class DeepSeekAgent:
         self._bound = bound
         self._transport = transport
         self._authorizer = authorizer
+        self._web_tools = (
+            bound.settings.response_contract_version
+            == PHASE9B_AGENT_RESPONSE_CONTRACT
+        )
         self._descriptor = AgentDescriptor(
             agent_id="deepseek_agent",
             adapter_id=bound.settings.adapter_id,
@@ -149,6 +173,18 @@ class DeepSeekAgent:
     def descriptor(self) -> AgentDescriptor:
         return self._descriptor
 
+    @property
+    def provider_call_reservation(self):
+        return self._bound.settings.suboperation_reservation()
+
+    @property
+    def provider_admission_profile(self) -> ProviderAdmissionProfile:
+        return (
+            ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
+            if self._web_tools
+            else ProviderAdmissionProfile.LEGACY_TASK_LIMIT_V1
+        )
+
     async def decide(
         self, request: AgentRequest, cancellation: CancellationSignal
     ) -> AgentDecision:
@@ -159,24 +195,25 @@ class DeepSeekAgent:
             role_id="agent",
             composition_hash=self._bound.composition_hash,
         )
-        reservation = self._bound.settings.policy.provider_call_reservation
-        if (
-            reservation.total_tokens > request.context.hard_limits.tokens
-            or reservation.cost_microunits
-            > request.context.hard_limits.cost_microunits
-        ):
-            return AgentFailedDecision(
-                error=AgentError(
-                    code="provider_call_reservation_exceeds_task_limit",
-                    message="Provider-call reservation exceeds task hard limit",
-                    retryable=False,
-                ),
-                usage=RuntimeResourceAmount(),
-                usage_certainty=UsageCertainty.EXACT,
-            )
+        if not self._web_tools:
+            reservation = self._bound.settings.policy.provider_call_reservation
+            if (
+                reservation.total_tokens > request.context.hard_limits.tokens
+                or reservation.cost_microunits
+                > request.context.hard_limits.cost_microunits
+            ):
+                return AgentFailedDecision(
+                    error=AgentError(
+                        code="provider_call_reservation_exceeds_task_limit",
+                        message="Provider-call reservation exceeds task hard limit",
+                        retryable=False,
+                    ),
+                    usage=RuntimeResourceAmount(),
+                    usage_certainty=UsageCertainty.EXACT,
+                )
         try:
             response = await self._transport.complete_async(
-                _messages("agent", request),
+                _messages("agent", request, enable_web_tools=self._web_tools),
                 cancellation=cancellation,
                 deadline=request.context.deadline,
             )
@@ -196,7 +233,12 @@ class DeepSeekAgent:
                 raise ValueError
             payload["usage"] = response.usage.model_dump(mode="json")
             payload["usage_certainty"] = response.usage_certainty.value
-            return TypeAdapter(Phase9ARealAgentDecision).validate_python(payload)
+            contract = (
+                Phase9BRealAgentDecision
+                if self._web_tools
+                else Phase9ARealAgentDecision
+            )
+            return TypeAdapter(contract).validate_python(payload)
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,

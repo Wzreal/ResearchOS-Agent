@@ -175,10 +175,22 @@ class OpenAICompatibleChatTransport:
         cancelled = asyncio.create_task(
             cancellation.wait(), name="researchos-provider-cancellation-waiter"
         )
-        timeout: float | None = None
+        provider_total_timeout = (
+            self._bound.settings.policy.provider_total_call_timeout_ms
+        )
+        timeout: float | None = (
+            provider_total_timeout / 1_000
+            if provider_total_timeout is not None
+            else None
+        )
         if deadline is not None:
             now = datetime.now(deadline.tzinfo)
-            timeout = max(0.0, (deadline - now).total_seconds())
+            deadline_timeout = max(0.0, (deadline - now).total_seconds())
+            timeout = (
+                deadline_timeout
+                if timeout is None
+                else min(timeout, deadline_timeout)
+            )
         try:
             done, _ = await asyncio.wait(
                 {operation, cancelled},
@@ -187,11 +199,15 @@ class OpenAICompatibleChatTransport:
             )
             if operation not in done:
                 await self._cancel_children(operation, cancelled)
-                code = (
-                    "provider_cancelled"
-                    if cancellation.cancelled
-                    else "provider_deadline_exceeded"
-                )
+                if cancellation.cancelled:
+                    code = "provider_cancelled"
+                elif deadline is not None and (
+                    provider_total_timeout is None
+                    or timeout < provider_total_timeout / 1_000
+                ):
+                    code = "provider_deadline_exceeded"
+                else:
+                    code = "provider_total_call_timeout"
                 raise RealProviderFailure(
                     code,
                     diagnostic=(

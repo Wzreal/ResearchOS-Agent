@@ -35,19 +35,33 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
+from researchos.domain.real_composition import ProviderSuboperationReservation
+from researchos.domain.real_tools import (
+    AuthorizedToolDispatchEnvelope,
+    CapabilityDispatchContext,
+)
 from researchos.domain.runtime import (
     IdempotencyMode,
     RuntimeResourceAmount,
     UsageCertainty,
 )
 from researchos.domain.tools import (
+    AdapterMode,
     ToolInvocationRequest,
     ToolInvocationResult,
     ToolInvocationStatus,
 )
 from researchos.interfaces.agent import Agent
 from researchos.interfaces.lifecycle import Clock, TraceSink
+from researchos.interfaces.providers import (
+    ProviderAdmissionProfile,
+    ProviderReservedTool,
+)
 from researchos.interfaces.runtime import AsyncSleeper, CancellationSignal
+from researchos.interfaces.tools import (
+    AuthorizedRealTool,
+    Phase3RetryDelegatingTool,
+)
 from researchos.security.redaction import PersistenceRedactor
 
 IdFactory = Callable[[str], str]
@@ -168,6 +182,31 @@ class AgentRunner:
             precondition = self._precondition_failure(context, cancellation, usage)
             if precondition is not None:
                 return precondition
+            if self._agent.descriptor.mode is AdapterMode.REAL:
+                profile = self._agent_admission_profile()
+                if profile is None:
+                    return self._failure(
+                        "provider_admission_profile_invalid",
+                        "REAL Agent has an invalid provider admission profile",
+                        usage,
+                    )
+                if profile is ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1:
+                    reservation = self._agent_provider_reservation()
+                    if reservation is None:
+                        return self._failure(
+                            "provider_reservation_contract_invalid",
+                            "REAL Agent does not expose provider reservation authority",
+                            usage,
+                        )
+                    admission = self._reservation_failure(
+                        "agent",
+                        reservation,
+                        usage,
+                        context.hard_limits,
+                        effective_tool_limit,
+                    )
+                    if admission is not None:
+                        return admission
             request = AgentRequest(
                 request_id=self._id_factory("areq"),
                 context=context,
@@ -290,7 +329,7 @@ class AgentRunner:
                 )
 
             tool_call = decision.tool_call
-            if len(observations) >= effective_tool_limit:
+            if usage.amount.tool_calls >= effective_tool_limit:
                 return self._failure(
                     "agent_tool_call_limit_exceeded",
                     "agent tool-call limit was exhausted",
@@ -329,6 +368,22 @@ class AgentRunner:
                     "non-idempotent tool requires a non-idempotent task",
                     usage,
                 )
+            if isinstance(tool, ProviderReservedTool):
+                admission = self._reservation_failure(
+                    "tool",
+                    tool.provider_call_reservation,
+                    usage,
+                    context.hard_limits,
+                    effective_tool_limit,
+                )
+                if admission is not None:
+                    return admission
+            elif descriptor.mode is AdapterMode.REAL:
+                return self._failure(
+                    "provider_reservation_contract_invalid",
+                    "REAL Tool does not expose provider reservation authority",
+                    usage,
+                )
             try:
                 self._redactor.assert_safe_model(tool_call.input)
             except Exception:
@@ -359,6 +414,41 @@ class AgentRunner:
                 deadline=context.deadline,
                 input=tool_call.input,
             )
+            if descriptor.mode is AdapterMode.REAL:
+                if not isinstance(tool, AuthorizedRealTool):
+                    return self._failure(
+                        "real_tool_authorization_contract_invalid",
+                        "REAL Tool does not expose authorized dispatch",
+                        usage,
+                    )
+                dispatch_context = CapabilityDispatchContext.build(
+                    run_id=context.run_id,
+                    task=context.task,
+                    task_id=context.task_id,
+                    task_contract_hash=model_sha256(context.task),
+                    task_operation_key=context.task_operation_key,
+                    requested_capability_id=descriptor.capability_id,
+                    authorized_capability_ids=context.authorized_capability_ids,
+                    descriptor_hash=model_sha256(descriptor),
+                    tool_operation_key=operation_key,
+                )
+                authorized = AuthorizedToolDispatchEnvelope(
+                    invocation=invocation,
+                    dispatch_context=dispatch_context,
+                )
+                def tool_invoke(
+                    resolved_tool=tool,
+                    authorized_envelope=authorized,
+                    signal=cancellation,
+                ):
+                    return resolved_tool.invoke_authorized(authorized_envelope, signal)
+            else:
+                def tool_invoke(
+                    resolved_tool=tool,
+                    tool_invocation=invocation,
+                    signal=cancellation,
+                ):
+                    return resolved_tool.invoke(tool_invocation, signal)
             try:
                 requested = self._emit(
                     context,
@@ -386,7 +476,7 @@ class AgentRunner:
                     ),
                 )
             tool_outcome, tool_value = await self._await_bounded(
-                tool.invoke(invocation, cancellation),
+                tool_invoke(),
                 deadline=context.deadline,
                 cancellation=cancellation,
             )
@@ -576,6 +666,15 @@ class AgentRunner:
             )
             if result.status is ToolInvocationStatus.SUCCEEDED:
                 observations.append(observation)
+            if result.status in {
+                ToolInvocationStatus.CANCELLED,
+                ToolInvocationStatus.TIMED_OUT,
+            }:
+                return self._failure(
+                    f"tool_{result.status.value}",
+                    result.error.message,
+                    usage,
+                )
             if usage.certainty is UsageCertainty.UNKNOWN:
                 return self._failure(
                     "tool_usage_unknown",
@@ -588,17 +687,20 @@ class AgentRunner:
                     "tool usage exceeded task hard limits",
                     usage,
                 )
-            if result.status in {
-                ToolInvocationStatus.CANCELLED,
-                ToolInvocationStatus.TIMED_OUT,
-            }:
-                return self._failure(
-                    f"tool_{result.status.value}",
-                    result.error.message,
-                    usage,
-                )
             if result.status is not ToolInvocationStatus.SUCCEEDED:
                 observations.append(observation)
+                assert result.error is not None
+                if (
+                    result.error.retryable
+                    and isinstance(tool, Phase3RetryDelegatingTool)
+                    and tool.delegates_retry_to_phase3
+                ):
+                    return self._failure(
+                        result.error.code,
+                        result.error.message,
+                        usage,
+                        retryable=self._tool_retryable(context, descriptor),
+                    )
             previous_event = terminal
 
         return self._failure(
@@ -677,6 +779,73 @@ class AgentRunner:
                 "agent_deadline_exhausted", "task deadline was exhausted", usage
             )
         return None
+
+    def _reservation_failure(
+        self,
+        boundary,
+        reservation,
+        usage,
+        hard_limits,
+        effective_tool_limit,
+    ):
+        amount = usage.amount
+        checks = (
+            (
+                "duration",
+                amount.duration_milliseconds + reservation.duration_milliseconds,
+                hard_limits.duration_milliseconds,
+            ),
+            ("tokens", amount.tokens + reservation.tokens, hard_limits.tokens),
+            (
+                "cost",
+                amount.cost_microunits + reservation.cost_microunits,
+                hard_limits.cost_microunits,
+            ),
+        )
+        for resource, candidate, limit in checks:
+            if candidate > limit:
+                return self._failure(
+                    f"{boundary}_provider_reservation_exceeds_remaining_{resource}",
+                    f"{boundary} provider reservation exceeds remaining hard limit",
+                    usage,
+                )
+        tool_limit = min(hard_limits.tool_calls, effective_tool_limit)
+        if amount.tool_calls + reservation.tool_calls > tool_limit:
+            return self._failure(
+                "tool_call_reservation_unavailable",
+                "provider reservation exceeds remaining Tool-call allowance",
+                usage,
+            )
+        return None
+
+    def _agent_admission_profile(self) -> ProviderAdmissionProfile | None:
+        """Read profile without runtime Protocol property probes.
+
+        Phase 9A direct agents intentionally retain legacy task-limit admission
+        and may not have a Phase 9B suboperation reservation available.
+        """
+
+        try:
+            profile = getattr(self._agent, "provider_admission_profile", None)
+        except Exception:
+            return None
+        if profile is None:
+            return ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
+        try:
+            return ProviderAdmissionProfile(profile)
+        except (TypeError, ValueError):
+            return None
+
+    def _agent_provider_reservation(self) -> ProviderSuboperationReservation | None:
+        """Read reservation authority only for accumulated REAL admission."""
+
+        try:
+            reservation = self._agent.provider_call_reservation
+        except Exception:
+            return None
+        if not isinstance(reservation, ProviderSuboperationReservation):
+            return None
+        return reservation
 
     @staticmethod
     def _over_limit(

@@ -1,11 +1,12 @@
-# Phase 9 Design — Phase 9A Implemented Boundary
+# Phase 9 Design — Phase 9A and 9B Implemented Boundary
 
 ## Scope
 
-Phase 9A adds safe REAL LLM composition and DeepSeek adapters without changing
-Phase 1-8 authority schemas. Tavily, Browser, Playwright, embeddings, Milvus,
-hybrid retrieval, Langfuse, Claim Extraction, workflow coordination, real E2E,
-and benchmark results are not implemented.
+Phase 9A adds safe REAL LLM composition and DeepSeek adapters. Phase 9B adds
+composition-frozen Tavily Search and a bounded HTTP Browser without changing
+Phase 1-8 authority schemas. Playwright, embeddings, Milvus, hybrid retrieval,
+Langfuse, Claim Extraction, workflow coordination, real E2E, and benchmark
+results are not implemented.
 
 ## Composition authority
 
@@ -119,10 +120,34 @@ Official-host allowlisting is deferred to Phase 9D security hardening. Phase 9A
 continues to require HTTPS and pins the canonical endpoint identity without
 claiming host allowlisting.
 
-Phase 9A does not expose Tool calls to the REAL Agent. Any non-empty REAL
-capability set fails composition preflight, and the Agent response schema
-contains only final/failed decisions. Binding per-Run capability input schemas
-is a Phase 9B prerequisite; AgentRunner remains the final authorization owner.
+Phase 9B exposes only the typed Search/Browser Tool decision union to the REAL
+Agent. Capability descriptors, policies, reservations, and operation versions
+are frozen in the per-Run composition. `AgentRunner` remains the final
+authorization and local hard-limit admission owner; a separate ephemeral
+authorized envelope protects the REAL adapter boundary without changing the v1
+Tool invocation persistence contract.
+
+The tool-capable Agent contract is selected only when the immutable REAL
+settings contain Search or Browser. Capability-empty Phase 9A Runs keep the
+original direct-only prompt/schema and `agent-direct-decision-v1`; Web-enabled
+Runs use `agent-tool-decision-v2`, producing distinct prompt, model-bundle, and
+composition hashes.
+
+For that web Agent profile only, the frozen model policy includes a total
+provider-call timeout. The provider reservation uses the same value and the
+async transport enforces it as a whole-operation deadline in addition to its
+phase-specific HTTPX stall timeouts. Capability-empty Phase 9A direct profiles
+retain their historical per-call token/cost preflight and deadline behavior.
+
+Tavily is fixed to its STANDARD HTTPS endpoint/profile with explicit documented
+request fields, no redirect/proxy/retry, and conservative versioned credit-cost
+reservation. Its summaries are provider metadata in `SearchResultV2` and yield
+zero Evidence. The Browser reauthorizes each redirect, double-resolves and pins
+ResearchOS-policy-approved addresses from an exact special-use table (including
+IPv4-mapped IPv6 and mixed-DNS rules), validates the connected peer and TLS hostname, rejects
+compression and unsupported MIME/charset, bounds bytes/time, and delegates text
+extraction to a sanitized bounded subprocess. See
+`docs/PHASE9_SECURITY_REVIEW.md` and ADR-0026.
 
 `DeepSeekPlanningModel`, `DeepSeekAgent`, and
 `DeepSeekVerificationModel` map this transport into existing ports. Agent usage
@@ -134,11 +159,12 @@ retains DISPATCHED precedence and UNKNOWN outcome semantics.
 
 Core imports do not import HTTPX or later provider packages. Optional extras
 are explicit, and a missing LLM extra raises `MissingOptionalDependency`.
-Core CI runs Phase 0-8 plus Phase 9A core tests after plain `uv sync`; a second
-offline job installs all extras.
+Core CI runs Phase 0-8 plus provider-independent Phase 9 tests after plain
+`uv sync`; a second offline job installs all extras, including Browser
+extraction tests.
 
 `researchos doctor --real` performs local configuration, secret-presence, and
-optional composition checks. In Phase 9A it makes zero paid calls and zero
-remote writes. Paid/write flags fail explicitly until their later bounded
-probes exist; provider availability therefore remains `PARTIALLY_VERIFIED`.
-Reports contain no credential values.
+optional composition and Phase 9B capability policy/dependency checks. It makes
+zero paid calls, remote writes, DNS queries, or HTTP requests. Paid/write flags
+fail explicitly until later bounded probes exist; provider availability
+therefore remains `PARTIALLY_VERIFIED`. Reports contain no credential values.
