@@ -7,10 +7,12 @@ composition-frozen Tavily Search and a bounded HTTP Browser without changing
 Phase 1-8 authority schemas. Phase 9C adds bounded Zilliz BM25 retrieval.
 Playwright, embeddings, hybrid retrieval,
 Langfuse, Claim Extraction, workflow coordination, real E2E, and benchmark
-results and the final operator runbook are not implemented. Phase 9 now also
+experiments are not implemented. Phase 9 now also
 has release gates: an exact public DeepSeek origin allowlist, frozen v1
 compatibility fixtures, deterministic offline filesystem E2E, wheel
-installability CI, and a separately protected manual REAL smoke workflow.
+installability CI, a separately protected manual REAL smoke workflow, and a
+published schema-v1 semantic baseline/operator runbook. The latter contains no
+REAL performance, quality, latency, or invoice claims.
 
 ## Phase 9 release-gate boundary
 
@@ -229,3 +231,23 @@ optional composition and Phase 9B capability policy/dependency checks. It makes
 zero paid calls, remote writes, DNS queries, or HTTP requests. Paid/write flags
 fail explicitly until later bounded probes exist; provider availability
 therefore remains `PARTIALLY_VERIFIED`. Reports contain no credential values.
+
+## Results and operator boundary
+
+`docs/RESULTS.md` publishes an actually generated, deterministic offline
+semantic projection of the byte-frozen `tests/fixtures/schema_v1` corpus. The
+measurement tool validates existing canonical persisted bytes through fresh
+adapters and records only stable artifact counts/hashes, authority
+identities/hashes, and typed Evaluation results in the checked-in publication.
+Timestamp, elapsed time, OS, Python, and local output occurrence metadata are
+not a published baseline. The corpus is Git `-text`, so raw SHA-256 values are
+defined over the canonical persisted LF bytes rather than checkout-dependent
+text conversion.
+
+The Phase 9 results document separates observed Run/provider values,
+deterministic offline fixture facts, admission/pricing upper bounds, and
+not-measured data. Reservations are never invoices. `docs/OPERATOR_RUNBOOK.md`
+documents only the implemented CLI, release gates, protected main-only REAL
+smoke, and Phase 8 fail-closed recovery boundary; it does not add an automatic
+REAL E2E, generic run/resume CLI, provider retry, or operator-side billing
+integration.

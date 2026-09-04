@@ -7,7 +7,9 @@ The project has completed Phases 0-8 and Phase 9A-9D plus release gates. It incl
 and DAG execution, Agent/Tool adapters, Evidence and Claim authorities, bounded
 verification, evaluation, resilience hardening, and an immutable REAL provider
 composition boundary with DeepSeek Planning/Agent/Verification adapters.
-The final Phase 9 measured-results and operator-runbook publication remains pending.
+Published deterministic baseline evidence, cost semantics, limitations, and
+operator procedures are available in [Results](docs/RESULTS.md) and the
+[Operator Runbook](docs/OPERATOR_RUNBOOK.md).
 
 ## Technical direction
 

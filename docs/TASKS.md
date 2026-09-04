@@ -192,4 +192,7 @@ not aspiration.
   DeepSeek public-origin admission, frozen schema-v1 compatibility corpus,
   deterministic filesystem lifecycle E2E, wheel-install CI, and an isolated
   operator-only REAL smoke workflow.
-- TODO — Publish measured results, limitations, costs, and operator runbook.
+- DONE — Publish an actually generated schema-v1 deterministic semantic
+  baseline, explicit NOT_MEASURED/UPPER_BOUND cost and limitation boundaries,
+  and an operator runbook with offline release gates and protected REAL smoke
+  procedures.

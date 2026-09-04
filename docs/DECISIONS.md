@@ -1098,3 +1098,34 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   cannot receive smoke credentials through this workflow. There is no claim of
   migration support for unknown historical schemas, no broad custom-endpoint
   support, and no measured-result/operator-runbook claim in this phase.
+
+## ADR-0030: Publish only reproducible semantic evidence and explicit cost limits
+
+- **Status:** Accepted
+- **Date:** 2026-09-04
+- **Decision:** The Phase 9 final publication distinguishes four evidence
+  classes: `OBSERVED` values in validated Run/provider artifacts,
+  `DETERMINISTIC_OFFLINE` fixture/evaluator evidence, `UPPER_BOUND` admission
+  and pricing-safety limits, and `NOT_MEASURED` data. No class may be silently
+  converted into another: a reservation is not an invoice, an offline fixture
+  is not a REAL benchmark, and unavailable data is not zero.
+
+  `scripts/measure_release_baseline.py` actually reads the checked-in
+  schema-v1 corpus through fresh filesystem adapters and publishes a stable
+  semantic projection in `docs/RESULTS.md`. The committed projection contains
+  only artifact counts/raw-byte SHA-256 values, authority identities/hashes,
+  and typed Evaluation metric status/value fields. It excludes timestamps,
+  duration, OS, Python, and other occurrence metadata. The frozen corpus is
+  marked Git `-text`, preserving the existing canonical persisted LF bytes and
+  preventing checkout EOL conversion from changing its byte hashes. Local JSON
+  occurrences are generated under ignored `outputs/` and are not release
+  artifacts.
+
+  REAL quality, latency, throughput, invoice cost, benchmark and full REAL E2E
+  claims remain `NOT_MEASURED` until separately approved measurements exist.
+  The operator runbook exposes only the existing offline gates, doctor,
+  protected main-only paid smoke, and Phase 8 recovery rules.
+- **Consequences:** A published semantic baseline now proves frozen artifact
+  compatibility facts without claiming portable performance. Future benchmark
+  or invoice publication requires a separately versioned dataset/measurement
+  protocol and cannot reuse this fixture baseline as evidence.
