@@ -18,7 +18,7 @@ jobs:
     # is supplied by the allowed dispatch event, never by a text input.
     if: >-
       inputs.paid_call_acknowledged == true &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/release-'))
+      github.ref == 'refs/heads/main'
     environment: researchos-real-smoke
     env:
       RESEARCHOS_REAL_SMOKE_ACKNOWLEDGED: "true"

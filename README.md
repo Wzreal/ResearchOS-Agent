@@ -36,8 +36,8 @@ uv run ruff check .
 ```
 
 The normal test suite is offline and cannot make paid provider calls. The
-separate `REAL smoke` GitHub workflow is manual-only, accepts only `main` or a
-`release-*` tag, requires an explicit paid-call acknowledgement, and runs in
+separate `REAL smoke` GitHub workflow is manual-only, accepts only `main`,
+requires an explicit paid-call acknowledgement, and runs in
 the protected `researchos-real-smoke` Environment. Environment reviewers and
 deployment-branch protection remain repository operator prerequisites.
 

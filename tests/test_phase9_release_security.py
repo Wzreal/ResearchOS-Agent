@@ -38,7 +38,7 @@ def test_real_smoke_workflow_is_manual_protected_and_ref_pinned():
     assert "environment: researchos-real-smoke" in text
     assert "inputs.paid_call_acknowledged == true" in text
     assert "github.ref == 'refs/heads/main'" in text
-    assert "startsWith(github.ref, 'refs/tags/release-')" in text
+    assert "refs/tags/release-" not in text
     assert "ref: ${{ github.sha }}" in text
     assert "inputs.ref" not in text
     assert "inputs.sha" not in text

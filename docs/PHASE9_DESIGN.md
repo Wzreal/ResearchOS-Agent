@@ -31,7 +31,7 @@ with its nonterminal policy opt-in.
 
 The only REAL smoke workflow is `workflow_dispatch`, protected by GitHub
 Environment `researchos-real-smoke`, a paid-call acknowledgement, and an
-allowed-ref gate (`main` or `release-*`). The workflow cannot establish that
+allowed-ref gate (`main` only). The workflow cannot establish that
 Environment reviewers or deployment branch rules have been configured; those
 are mandatory operator release prerequisites.
 

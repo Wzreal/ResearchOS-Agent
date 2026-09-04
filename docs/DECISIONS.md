@@ -1090,7 +1090,7 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   A paid REAL smoke test is deliberately separate, marker-gated, and triggered
   only by `workflow_dispatch`. Its job has `contents: read`, is bound to the
   fixed `researchos-real-smoke` GitHub Environment, requires an explicit
-  acknowledgement, and only runs for `refs/heads/main` or `release-*` tags.
+  acknowledgement, and only runs for `refs/heads/main`.
   It checks out the event SHA rather than a user text input. GitHub Environment
   reviewers and deployment branch restrictions cannot be proven by workflow
   source, and are an operator release prerequisite.

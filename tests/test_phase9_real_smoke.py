@@ -90,4 +90,5 @@ def test_real_planning_smoke_requires_acknowledgement_and_live_credentials(tmp_p
         ).plan(state, planning_policy())
     finally:
         model.close()
-    assert result.status is not PlanningStatus.MODEL_ERROR
+    assert result.status is PlanningStatus.VALIDATED
+    assert result.validated_dag is not None
