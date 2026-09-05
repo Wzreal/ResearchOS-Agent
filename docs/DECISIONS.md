@@ -1129,3 +1129,23 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   compatibility facts without claiming portable performance. Future benchmark
   or invoice publication requires a separately versioned dataset/measurement
   protocol and cannot reuse this fixture baseline as evidence.
+
+## ADR-0031: Compose Phase 10 through existing durable authorities
+
+- **Status:** Accepted
+- **Date:** 2026-09-05
+- **Decision:** `Phase10WorkflowProfileV1` is immutable configuration. Its
+  canonical hash is frozen at `PLANNING_STARTED` and in a separate
+  `WorkflowRuntimeHandoff`; Phase 1–9 Run, budget, checkpoint, Evidence,
+  ClaimGraph, verification, and evaluation contracts remain unchanged.
+  `WorkflowFactory` is the sole filesystem composition boundary and
+  `WorkflowCoordinator` uses the existing authorities for lifecycle and
+  recovery. The explicit `phase10_mock@1` bundle is configuration-only; the
+  factory constructs deterministic offline adapters. CLI `run` and `resume`
+  delegate only to this path, while `inspect` is a non-mutating file projection.
+- **Consequences:** Resume can reconstruct a fresh factory and return terminal
+  state without duplicate durable effects. Missing or mismatched MOCK pins fail
+  closed; Phase 10 REAL workflow execution remains fail-closed. The sole Phase
+  10 evaluation, `structural_selfcheck_v1`, rebuilds a structural-only dataset
+  from persisted input and profile through the unchanged Phase 7 harness. It is
+  not benchmark, factual, or human quality evidence.

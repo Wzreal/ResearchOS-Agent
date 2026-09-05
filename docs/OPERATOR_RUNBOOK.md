@@ -1,6 +1,6 @@
 # ResearchOS Operator Runbook
 
-This runbook is for the implemented Phase 9 profile. It does not authorize
+This runbook is for the implemented Phase 9 and Phase 10 profiles. It does not authorize
 manual edits to durable JSON, provider retries, or Run-state guesses.
 
 ## Install and offline release gates
@@ -92,10 +92,36 @@ Generated `outputs/` are ignored and must not be committed. The canonical local
 trace and the persisted authorities are source of truth; OTLP is only a
 best-effort mirror. Inspect recovery in the authority order and follow the
 fail-closed rules in [PHASE8_RECOVERY_RUNBOOK.md](PHASE8_RECOVERY_RUNBOOK.md).
-There is no generic `researchos run` or `researchos resume` CLI. An embedding
-application must use the existing RunManager and durable verification APIs;
-never edit `run_state.json`, checkpoints, traces, evidence, claims, or
-verification operations by hand.
+Phase 10 provides one explicit offline workflow bundle:
+
+```shell
+researchos run "question" --mode mock
+researchos inspect <run_id>
+researchos resume <run_id>
+```
+
+`run` uses `phase10_mock@1`, `WorkflowFactory`, and `WorkflowCoordinator`.
+Planning freezes the profile budget at `PLANNING_STARTED`; the validated DAG and
+execution policy flow through `WorkflowRuntimeHandoff`. Existing checkpoint,
+Evidence, Claim Extraction, ClaimGraph, verification, and evaluation
+authorities remain the only durable authorities. `resume` constructs a fresh
+filesystem-backed factory, checks the persisted profile pin, and derives work
+only from durable artifacts. A terminal Run returns its existing result without
+duplicate effects. `inspect` performs no mkdir, repair, credential read,
+provider call, or persistent write.
+
+`researchos run --mode real` intentionally fails closed until an explicit Phase
+10 REAL workflow profile/configuration is supplied; it never falls back to
+MOCK. Phase 9 historical REAL composition is three-role: planning, agent, and
+verification. Phase 10 REAL composition additionally requires
+`claim_extraction`, but this runbook does not authorize Phase 10 REAL calls.
+
+`structural_selfcheck_v1` deterministically reconstructs one structural-only
+case from persisted input and `Phase10WorkflowProfileV1` with the existing
+Phase 7 evaluation harness. It is not benchmark quality evaluation, factual
+quality evaluation, human evaluation, or Phase 11 benchmark evidence. Never
+edit `run_state.json`, checkpoints, traces, evidence, claims, extraction
+operations, verification operations, or evaluation artifacts by hand.
 
 For corruption, composition mismatch, an unknown dispatched provider outcome,
 or a missing optional dependency: stop, preserve artifacts, redact any external

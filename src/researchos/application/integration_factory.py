@@ -13,6 +13,7 @@ from researchos.adapters.browser import (
 from researchos.adapters.clock import SystemClock
 from researchos.adapters.deepseek import (
     DeepSeekAgent,
+    DeepSeekClaimExtractionModel,
     DeepSeekPlanningModel,
     DeepSeekVerificationModel,
 )
@@ -30,6 +31,7 @@ from researchos.application.real_composition import (
     RealCompositionManager,
 )
 from researchos.domain.contracts import TERMINAL_STATUSES
+from researchos.domain.runtime import RuntimeResourceAmount
 from researchos.domain.tools import AdapterMode
 from researchos.interfaces.lifecycle import RunStore
 
@@ -100,6 +102,23 @@ class RealIntegrationFactory:
         )
         return DeepSeekVerificationModel(
             bound, self._transport_factory(bound), self._authorizer
+        )
+
+    def claim_extraction_model(
+        self, run_id: str, *, workflow_budget_slice: RuntimeResourceAmount
+    ) -> DeepSeekClaimExtractionModel:
+        self._authorizer.authorize(run_id=run_id, role_id="claim_extraction")
+        bound = self._manager.bound_model(run_id, "claim_extraction")
+        self._authorizer.authorize(
+            run_id=run_id,
+            role_id="claim_extraction",
+            composition_hash=bound.composition_hash,
+        )
+        return DeepSeekClaimExtractionModel(
+            bound,
+            self._transport_factory(bound),
+            self._authorizer,
+            workflow_budget_slice,
         )
 
     def capability_registry(self, run_id: str) -> CapabilityRegistry:

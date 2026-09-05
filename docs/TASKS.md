@@ -196,3 +196,21 @@ not aspiration.
   baseline, explicit NOT_MEASURED/UPPER_BOUND cost and limitation boundaries,
   and an operator runbook with offline release gates and protected REAL smoke
   procedures.
+
+## Phase 10 — Durable end-to-end workflow
+
+- DONE — Add `Phase10WorkflowProfileV1`, immutable planning-budget freeze at
+  `PLANNING_STARTED`, validated execution-policy construction, and durable
+  `WorkflowRuntimeHandoff` without changing Phase 1–9 authorities.
+- DONE — Compose the existing lifecycle, checkpoint, Evidence, ClaimGraph,
+  Claim Extraction, verification, and evaluation authorities through the
+  filesystem-backed `WorkflowFactory` and `WorkflowCoordinator`.
+- DONE — Publish explicit `phase10_mock@1` and `researchos run`, `resume`, and
+  strictly read-only `inspect`. Fresh-process resume recovers supported
+  nonterminal durable stages; terminal resume returns durable results without
+  duplicate effects. REAL workflow execution remains fail-closed.
+- DONE — Reconstruct `structural_selfcheck_v1` from persisted input and the
+  pinned profile with the unchanged Phase 7 harness. It is structural-only,
+  not benchmark, factual-quality, human, or Phase 11 evidence.
+- DONE — Complete offline regression, schema-v1 baseline, build, and installed
+  wheel MOCK run/inspect/resume validation without REAL/provider calls.

@@ -64,7 +64,7 @@ class OpenAICompatibleChatTransport:
         self._bound = bound
         self._sync_client = sync_client
         self._async_client = async_client
-        needs_sync = bound.settings.role_id == "planning"
+        needs_sync = bound.settings.role_id in {"planning", "claim_extraction"}
         needs_async = bound.settings.role_id in {"agent", "verification"}
         self._owns_sync_client = sync_client is None and needs_sync
         self._owns_async_client = async_client is None and needs_async

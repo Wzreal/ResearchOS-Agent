@@ -14,7 +14,13 @@ from researchos.application.errors import (
     PlanningPreconditionError,
     ReplanLineageConflict,
 )
-from researchos.domain.contracts import RunState, RunStatus, TraceEvent, TraceEventType
+from researchos.domain.contracts import (
+    OperatingMode,
+    RunState,
+    RunStatus,
+    TraceEvent,
+    TraceEventType,
+)
 from researchos.domain.planning import (
     CandidatePlan,
     PlanningError,
@@ -31,6 +37,8 @@ from researchos.domain.planning import (
     ReplanResult,
     ValidationResult,
 )
+from researchos.domain.runtime import RuntimeResourceAmount
+from researchos.domain.workflow import Phase10PlanningAdmission
 from researchos.interfaces.lifecycle import Clock, TraceSink
 from researchos.interfaces.planning import PlanningModel
 from researchos.security.redaction import PersistenceRedactor
@@ -114,12 +122,64 @@ class PerspectivePlanner:
             )
         self._lineages[context.prior_plan_id] = context.model_copy(deep=True)
 
-    def plan(self, state: RunState, policy: PlanningPolicy) -> PlanningResult:
+    def plan(
+        self,
+        state: RunState,
+        policy: PlanningPolicy,
+        *,
+        remaining_budget: RemainingBudget | None = None,
+        planning_started_attributes: dict[str, Any] | None = None,
+        phase10_planning_admission: Phase10PlanningAdmission | None = None,
+    ) -> PlanningResult:
         self._require_planning(state)
-        request = self._new_request(state, policy=policy)
-        result = self._plan_once(state, request=request, prior_decision_id=None)
+        if phase10_planning_admission is not None:
+            self._validate_phase10_admission(state, phase10_planning_admission)
+            if remaining_budget is not None:
+                raise PlanningPreconditionError(
+                    "Phase 10 planning admission owns the remaining budget view"
+                )
+            remaining_budget = RemainingBudget.model_validate(
+                phase10_planning_admission.allocation.execution.model_dump()
+            )
+            frozen_attributes = phase10_planning_admission.trace_attributes()
+            if planning_started_attributes is not None:
+                raise PlanningPreconditionError(
+                    "Phase 10 planning admission does not accept extra trace attributes"
+                )
+            planning_started_attributes = frozen_attributes
+        request = self._new_request(
+            state, policy=policy, remaining_budget_override=remaining_budget
+        )
+        result = self._plan_once(
+            state,
+            request=request,
+            prior_decision_id=None,
+            planning_started_attributes=planning_started_attributes,
+        )
         self._lineages[result.plan_id] = result.replan_context
         return result
+
+    @staticmethod
+    def _validate_phase10_admission(
+        state: RunState, admission: Phase10PlanningAdmission
+    ) -> None:
+        total = RuntimeResourceAmount(
+            duration_milliseconds=state.budget.limits.max_duration_seconds * 1_000,
+            tokens=state.budget.limits.max_tokens,
+            cost_microunits=state.budget.limits.max_cost_microunits,
+            tool_calls=state.budget.limits.max_tool_calls,
+        )
+        if admission.allocation.total != total:
+            raise PlanningPreconditionError(
+                "Phase 10 workflow allocation differs from effective Run budget"
+            )
+        if (
+            state.config.mode is OperatingMode.REAL
+            and admission.planning_reservation is None
+        ):
+            raise PlanningPreconditionError(
+                "REAL Phase 10 planning requires a provider reservation"
+            )
 
     def replan(
         self,
@@ -266,6 +326,7 @@ class PerspectivePlanner:
         request: PlanningRequest,
         prior_decision_id: str | None,
         causation_id: str | None = None,
+        planning_started_attributes: dict[str, Any] | None = None,
     ) -> PlanningResult:
         started = self._append_trace(
             state,
@@ -273,6 +334,7 @@ class PerspectivePlanner:
             correlation_id=request.request_id,
             causation_id=causation_id,
             attributes={
+                **(planning_started_attributes or {}),
                 "plan_id": request.plan_id,
                 "run_revision": request.run_revision,
                 "replan_count": request.replan_count,
@@ -404,6 +466,7 @@ class PerspectivePlanner:
         replan_count: int = 0,
         reason_code: str | None = None,
         reason: str | None = None,
+        remaining_budget_override: RemainingBudget | None = None,
     ) -> PlanningRequest:
         limits = state.budget.limits
         usage = state.budget.usage
@@ -417,7 +480,8 @@ class PerspectivePlanner:
             output_format=state.config.output_format,
             requested_at=self._clock.now(),
             allowed_capability_ids=state.config.allowed_capability_ids,
-            remaining_budget=RemainingBudget(
+            remaining_budget=remaining_budget_override
+            or RemainingBudget(
                 duration_milliseconds=(
                     limits.max_duration_seconds * 1_000 - usage.elapsed_milliseconds
                 ),

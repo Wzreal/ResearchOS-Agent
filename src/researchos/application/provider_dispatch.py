@@ -29,6 +29,7 @@ class RunLifecycleDispatchAuthorizer:
                 else {RunStatus.PLANNING}
             ),
             "agent": {RunStatus.RUNNING},
+            "claim_extraction": {RunStatus.RUNNING},
             "verification": {RunStatus.VERIFYING},
         }
         if role_id not in allowed:

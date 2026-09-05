@@ -13,15 +13,23 @@ from researchos.application.errors import (
 )
 from researchos.application.perspective_planner import PerspectivePlanner
 from researchos.application.run_manager import RunManager
+from researchos.application.workflow_budget import prepare_phase10_planning_admission
 from researchos.domain.contracts import RunConfig, RunInput, RunStatus, TraceEventType
 from researchos.domain.planning import (
     PlanningModelResponse,
     PlanningStatus,
+    RemainingBudget,
     ReplanContext,
     ReplanDecisionStatus,
     ReplanPolicy,
     ReplanRequest,
     ValidationIssueCode,
+)
+from researchos.domain.real_composition import ProviderSuboperationReservation
+from researchos.domain.runtime import RuntimeResourceAmount
+from researchos.domain.workflow import (
+    Phase10WorkflowBudgetConfigV1,
+    WorkflowBudgetAllocation,
 )
 
 
@@ -90,6 +98,175 @@ def test_mock_planner_returns_validated_dag_and_ordered_trace() -> None:
         for event in trace.read(state.run_id)
         if event.event_type.value.startswith("planning.")
     )
+
+
+def _phase10_budget_config(state, *, planning: RuntimeResourceAmount):
+    total = RuntimeResourceAmount(
+        duration_milliseconds=state.budget.limits.max_duration_seconds * 1_000,
+        tokens=state.budget.limits.max_tokens,
+        cost_microunits=state.budget.limits.max_cost_microunits,
+        tool_calls=state.budget.limits.max_tool_calls,
+    )
+    return Phase10WorkflowBudgetConfigV1(
+        profile_id="phase10_budget",
+        profile_version="v1",
+        allocation=WorkflowBudgetAllocation(
+            total=total,
+            planning=planning,
+            execution=total.minus(planning),
+            claim_extraction=RuntimeResourceAmount(),
+            verification=RuntimeResourceAmount(),
+        ),
+    )
+
+
+def _reservation(*, tokens: int) -> ProviderSuboperationReservation:
+    return ProviderSuboperationReservation.build(
+        reservation_version="phase10_planning_v1",
+        duration_milliseconds=1,
+        tokens=tokens,
+        cost_microunits=0,
+        cost_currency="USD",
+        tool_calls=0,
+        pricing_policy_id="pricing",
+        pricing_policy_version="v1",
+        pricing_rules_hash="a" * 64,
+    )
+
+
+def test_phase10_admission_freezes_exact_execution_budget_in_planning_trace() -> None:
+    state, trace, clock, ids = planning_state()
+    model = MockPlanningModel(
+        {PlanningFixtureKey("normalized query", 0, None): model_response}
+    )
+    planning = RuntimeResourceAmount(
+        duration_milliseconds=1_000,
+        tokens=10,
+        cost_microunits=0,
+        tool_calls=0,
+    )
+    config = _phase10_budget_config(state, planning=planning)
+    admission = prepare_phase10_planning_admission(
+        state,
+        config=config,
+        planning_reservation=_reservation(tokens=10),
+        workflow_profile_hash="a" * 64,
+    )
+
+    result = planner_for(model, trace, clock, ids).plan(
+        state, planning_policy(), phase10_planning_admission=admission
+    )
+
+    assert result.status is PlanningStatus.VALIDATED
+    assert model.requests[0].remaining_budget == RemainingBudget.model_validate(
+        admission.allocation.execution.model_dump()
+    )
+    started = next(
+        event
+        for event in trace.read(state.run_id)
+        if event.event_type is TraceEventType.PLANNING_STARTED
+    )
+    assert started.attributes["workflow_budget_allocation"] == (
+        admission.allocation.model_dump(mode="json")
+    )
+    assert (
+        started.attributes["workflow_budget_allocation_hash"]
+        == admission.allocation_hash
+    )
+    assert started.attributes["planning_reservation_hash"] == _reservation(
+        tokens=10
+    ).reservation_hash
+
+
+def test_phase10_planning_reservation_over_budget_makes_zero_model_calls() -> None:
+    state, trace, clock, ids = planning_state()
+    model = MockPlanningModel(
+        {PlanningFixtureKey("normalized query", 0, None): model_response}
+    )
+    config = _phase10_budget_config(
+        state,
+        planning=RuntimeResourceAmount(
+            duration_milliseconds=1_000,
+            tokens=1,
+            cost_microunits=0,
+            tool_calls=0,
+        ),
+    )
+
+    with pytest.raises(PlanningPreconditionError, match="exceeds"):
+        prepare_phase10_planning_admission(
+            state,
+            config=config,
+            planning_reservation=_reservation(tokens=2),
+            workflow_profile_hash="a" * 64,
+        )
+
+    assert model.requests == []
+    assert trace.read(state.run_id) == () or all(
+        event.event_type is not TraceEventType.PLANNING_STARTED
+        for event in trace.read(state.run_id)
+    )
+
+
+def test_phase10_trace_failure_prevents_model_dispatch() -> None:
+    state, trace, clock, ids = planning_state()
+    model = MockPlanningModel(
+        {PlanningFixtureKey("normalized query", 0, None): model_response}
+    )
+
+    class FailingTrace:
+        def append(self, event):
+            if event.event_type is TraceEventType.PLANNING_STARTED:
+                raise OSError("trace unavailable")
+            trace.append(event)
+
+        def append_once(self, descriptor):
+            return trace.append_once(descriptor)
+
+        def read(self, run_id, *, recover_torn_tail=False):
+            return trace.read(run_id, recover_torn_tail=recover_torn_tail)
+
+    config = _phase10_budget_config(
+        state,
+        planning=RuntimeResourceAmount(
+            duration_milliseconds=1_000,
+            tokens=10,
+            cost_microunits=0,
+            tool_calls=0,
+        ),
+    )
+    admission = prepare_phase10_planning_admission(
+        state,
+        config=config,
+        planning_reservation=_reservation(tokens=10),
+        workflow_profile_hash="a" * 64,
+    )
+
+    with pytest.raises(OSError, match="trace unavailable"):
+        planner_for(model, FailingTrace(), clock, ids).plan(
+            state, planning_policy(), phase10_planning_admission=admission
+        )
+
+    assert model.requests == []
+
+
+def test_planner_uses_explicit_remaining_budget_override() -> None:
+    state, trace, clock, ids = planning_state()
+    model = MockPlanningModel(
+        {PlanningFixtureKey("normalized query", 0, None): model_response}
+    )
+    override = RemainingBudget(
+        duration_milliseconds=123,
+        tokens=456,
+        cost_microunits=789,
+        tool_calls=2,
+    )
+
+    planner_for(model, trace, clock, ids).plan(
+        state, planning_policy(), remaining_budget=override
+    )
+
+    assert model.requests[0].remaining_budget == override
 
 
 def test_malformed_candidate_has_real_validation_but_model_error_does_not() -> None:

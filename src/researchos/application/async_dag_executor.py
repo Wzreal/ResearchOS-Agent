@@ -100,6 +100,7 @@ class AsyncDAGExecutor:
         policy: ExecutionPolicy,
         *,
         replan_context: ReplanContext,
+        budget_limits: RuntimeResourceAmount | None = None,
     ) -> RuntimeCheckpoint:
         if state.status is not RunStatus.RUNNING:
             raise RuntimePreconditionError("executor requires RunStatus.RUNNING")
@@ -112,6 +113,15 @@ class AsyncDAGExecutor:
             raise RuntimePreconditionError(
                 "execution policy must cover the DAG exactly"
             )
+        run_limits = RuntimeResourceAmount(
+            duration_milliseconds=state.budget.limits.max_duration_seconds * 1_000,
+            tokens=state.budget.limits.max_tokens,
+            cost_microunits=state.budget.limits.max_cost_microunits,
+            tool_calls=state.budget.limits.max_tool_calls,
+        )
+        effective_limits = budget_limits or run_limits
+        if not effective_limits.fits_within(run_limits):
+            raise RuntimePreconditionError("runtime budget limits exceed Run budget")
         now = self._clock.now()
         mutation_id = self._new_id("mutation")
         checkpoint = RuntimeCheckpoint(
@@ -129,18 +139,16 @@ class AsyncDAGExecutor:
                 TaskRuntimeState(task_id=task_id) for task_id in dag.topological_order
             ),
             budget=RuntimeBudgetState(
-                limits=RuntimeResourceAmount(
-                    duration_milliseconds=state.budget.limits.max_duration_seconds
-                    * 1_000,
-                    tokens=state.budget.limits.max_tokens,
-                    cost_microunits=state.budget.limits.max_cost_microunits,
-                    tool_calls=state.budget.limits.max_tool_calls,
-                ),
-                consumed=RuntimeResourceAmount(
-                    duration_milliseconds=state.budget.usage.elapsed_milliseconds,
-                    tokens=state.budget.usage.tokens,
-                    cost_microunits=state.budget.usage.cost_microunits,
-                    tool_calls=state.budget.usage.tool_calls,
+                limits=effective_limits,
+                consumed=(
+                    RuntimeResourceAmount()
+                    if budget_limits is not None
+                    else RuntimeResourceAmount(
+                        duration_milliseconds=state.budget.usage.elapsed_milliseconds,
+                        tokens=state.budget.usage.tokens,
+                        cost_microunits=state.budget.usage.cost_microunits,
+                        tool_calls=state.budget.usage.tool_calls,
+                    )
                 ),
             ),
             replan=DurableReplanState(

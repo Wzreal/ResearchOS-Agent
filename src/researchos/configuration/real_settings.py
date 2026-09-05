@@ -176,15 +176,22 @@ class RealModelSettings(ContractModel):
             self.model_id
         ):
             raise ValueError("pricing safety profile differs from adapter authority")
-        is_web_agent = self.response_contract_version in {
+        requires_suboperation_timeout = self.response_contract_version in {
             "agent-tool-decision-v2",
             "agent-tool-decision-v3",
+            "claim-extraction-response-v1",
         }
-        if is_web_agent and self.policy.provider_total_call_timeout_ms is None:
-            raise ValueError("web Agent requires a total provider-call timeout")
-        if not is_web_agent and self.policy.provider_total_call_timeout_ms is not None:
+        if (
+            requires_suboperation_timeout
+            and self.policy.provider_total_call_timeout_ms is None
+        ):
+            raise ValueError("provider suboperation profile requires a total timeout")
+        if (
+            not requires_suboperation_timeout
+            and self.policy.provider_total_call_timeout_ms is not None
+        ):
             raise ValueError(
-                "only the web Agent profile may set a total provider timeout"
+                "only a suboperation profile may set a total provider timeout"
             )
         return self
 

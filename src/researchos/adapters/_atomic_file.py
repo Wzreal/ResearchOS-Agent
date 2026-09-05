@@ -18,7 +18,17 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
+def _native_path(path: Path) -> Path:
+    """Return a Windows extended-length path only for filesystem syscalls."""
+
+    raw = str(path)
+    if _is_windows() and not raw.startswith("\\\\?\\"):
+        return Path("\\\\?\\" + raw)
+    return path
+
+
 def fsync_parent(path: Path) -> None:
+    path = _native_path(path)
     try:
         descriptor = os.open(path, os.O_RDONLY)
     except OSError:
@@ -47,6 +57,8 @@ def atomic_replace_bytes(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    temp_path = _native_path(temp_path)
+    path = _native_path(path)
     replaced = False
     try:
         fault("before_temp_write")
