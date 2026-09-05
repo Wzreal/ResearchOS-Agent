@@ -25,6 +25,7 @@ from researchos.domain.contracts import (
     model_sha256,
 )
 from researchos.domain.identity import stable_id
+from researchos.domain.planning import TaskDAG
 from researchos.domain.runtime import ExecutorStatus
 from researchos.domain.workflow import Phase10WorkflowProfileV1
 from researchos.interfaces.evidence import EvidenceStore
@@ -270,7 +271,7 @@ class WorkflowCoordinator:
         policy = self._policies.build(
             result.validated_dag,
             admission.allocation.execution,
-            self._profile.execution,
+            self._execution_config_for_dag(result.validated_dag),
         )
         self._handoffs.prepare(
             state,
@@ -285,6 +286,32 @@ class WorkflowCoordinator:
         )
         self._handoffs.create_or_validate_checkpoint(state)
         return self._runs.load(state.run_id)
+
+    def _execution_config_for_dag(self, dag: TaskDAG):
+        """Bind existing uniform Phase 10 policy templates to validated task IDs."""
+
+        config = self._profile.execution
+        policies = tuple(sorted(config.task_policies, key=lambda item: item.task_id))
+        tasks = tuple(sorted(dag.tasks, key=lambda item: item.task_id))
+        if {item.task_id for item in policies} == {item.task_id for item in tasks}:
+            return config
+        if len(policies) != len(tasks):
+            return config
+        template = policies[0]
+        if any(
+            item.model_dump(mode="python", exclude={"task_id"})
+            != template.model_dump(mode="python", exclude={"task_id"})
+            for item in policies[1:]
+        ):
+            return config
+        return config.model_copy(
+            update={
+                "task_policies": tuple(
+                    template.model_copy(update={"task_id": task.task_id})
+                    for task in tasks
+                )
+            }
+        )
 
     def _planning_failure_error(
         self,

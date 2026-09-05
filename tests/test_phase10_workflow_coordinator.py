@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+import pytest
+
+from researchos.application.errors import RuntimePreconditionError
+from researchos.application.execution_policy_builder import ExecutionPolicyBuilder
 from researchos.application.workflow_coordinator import WorkflowCoordinator
 from researchos.application.workflow_factory import WorkflowFactory
 from researchos.configuration.phase10_mock import build_phase10_mock_bundle_v1
@@ -10,6 +15,7 @@ from researchos.domain.contracts import (
     OperatingMode,
     RunConfig,
     RunStatus,
+    model_sha256,
 )
 from researchos.domain.planning import (
     PlanningError,
@@ -168,3 +174,112 @@ def test_planning_failure_preserves_dispatch_outcome_semantics(lifecycle) -> Non
     assert state.errors[0].code == "provider_total_call_timeout"
     assert "unknown after dispatch" in state.errors[0].message
     assert planner.calls == 1
+
+
+def test_uniform_execution_templates_bind_dynamic_validated_dag_ids_and_build_policy(
+    lifecycle,
+) -> None:
+    runs, _, trace, clock, *_ = lifecycle
+    coordinator = _failure_coordinator(runs, trace, clock, planner=None)
+    dag = SimpleNamespace(
+        tasks=tuple(
+            SimpleNamespace(task_id=item) for item in ("alpha", "beta", "gamma")
+        )
+    )
+    original = coordinator._profile.execution
+    original_profile_hash = model_sha256(coordinator._profile)
+    effective = coordinator._execution_config_for_dag(dag)
+    recovered = coordinator._execution_config_for_dag(dag)
+    policy = ExecutionPolicyBuilder().build(
+        dag,
+        coordinator._profile.budget.allocation.execution,
+        effective,
+    )
+
+    assert tuple(item.task_id for item in effective.task_policies) == (
+        "alpha",
+        "beta",
+        "gamma",
+    )
+    assert tuple(item.task_id for item in policy.tasks) == ("alpha", "beta", "gamma")
+    assert effective == recovered
+    assert tuple(
+        item.model_dump(mode="python", exclude={"task_id"})
+        for item in effective.task_policies
+    ) == tuple(
+        item.model_dump(mode="python", exclude={"task_id"})
+        for item in original.task_policies
+    )
+    assert sum(
+        item.reservation.cost_microunits for item in effective.task_policies
+    ) == sum(item.reservation.cost_microunits for item in original.task_policies)
+    assert (
+        coordinator._profile.budget.allocation.execution
+        == build_phase10_mock_bundle_v1().workflow_profile.budget.allocation.execution
+    )
+    assert coordinator._profile.execution == original
+    assert model_sha256(coordinator._profile) == original_profile_hash
+
+
+@pytest.mark.parametrize(
+    "task_ids", (("alpha", "beta"), ("alpha", "beta", "gamma", "delta"))
+)
+def test_dynamic_execution_template_rebinding_fails_closed_for_cardinality_mismatch(
+    task_ids,
+    lifecycle,
+) -> None:
+    runs, _, trace, clock, *_ = lifecycle
+    coordinator = _failure_coordinator(runs, trace, clock, planner=None)
+    dag = SimpleNamespace(
+        tasks=tuple(SimpleNamespace(task_id=item) for item in task_ids)
+    )
+
+    assert coordinator._execution_config_for_dag(dag) is coordinator._profile.execution
+    with pytest.raises(RuntimePreconditionError, match="cover DAG exactly"):
+        ExecutionPolicyBuilder().build(
+            dag,
+            coordinator._profile.budget.allocation.execution,
+            coordinator._profile.execution,
+        )
+
+
+def test_dynamic_execution_template_rebinding_fails_closed_for_nonuniform_templates(
+    lifecycle,
+) -> None:
+    runs, _, trace, clock, *_ = lifecycle
+    coordinator = _failure_coordinator(runs, trace, clock, planner=None)
+    original = coordinator._profile.execution
+    nonuniform = original.task_policies[1].model_copy(
+        update={
+            "timeout_milliseconds": 6_000,
+            "reservation": original.task_policies[1].reservation.model_copy(
+                update={"duration_milliseconds": 6_000}
+            ),
+        }
+    )
+    coordinator._profile = coordinator._profile.model_copy(
+        update={
+            "execution": original.model_copy(
+                update={
+                    "task_policies": (
+                        original.task_policies[0],
+                        nonuniform,
+                        original.task_policies[2],
+                    )
+                }
+            )
+        }
+    )
+    dag = SimpleNamespace(
+        tasks=tuple(
+            SimpleNamespace(task_id=item) for item in ("alpha", "beta", "gamma")
+        )
+    )
+
+    assert coordinator._execution_config_for_dag(dag) is coordinator._profile.execution
+    with pytest.raises(RuntimePreconditionError, match="cover DAG exactly"):
+        ExecutionPolicyBuilder().build(
+            dag,
+            coordinator._profile.budget.allocation.execution,
+            coordinator._profile.execution,
+        )
