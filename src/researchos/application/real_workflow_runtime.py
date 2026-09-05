@@ -15,6 +15,7 @@ from researchos.domain.agent import AgentDescriptor, AgentRequest
 from researchos.domain.claim_extraction import ClaimExtractionRequest
 from researchos.domain.contracts import RunState
 from researchos.domain.planning import PlanningModelResponse, PlanningRequest
+from researchos.domain.real_composition import ProviderSuboperationReservation
 from researchos.domain.real_tools import AuthorizedToolDispatchEnvelope
 from researchos.domain.synthesis import (
     VerificationModelRequest,
@@ -79,6 +80,16 @@ class RealWorkflowRuntime:
             request, cancellation
         )
 
+    def agent_provider_call_reservation(self) -> ProviderSuboperationReservation:
+        return self._integrations.agent(
+            self._require_run_id()
+        ).provider_call_reservation
+
+    def agent_provider_admission_profile(self):
+        return self._integrations.agent(
+            self._require_run_id()
+        ).provider_admission_profile
+
     def claim_extraction(self, request: ClaimExtractionRequest):
         return self._integrations.claim_extraction_model(
             self._require_run_id(), workflow_budget_slice=self._claim_budget
@@ -120,6 +131,14 @@ class RealAgent:
     def descriptor(self) -> AgentDescriptor:
         return self._runtime.agent_descriptor
 
+    @property
+    def provider_call_reservation(self) -> ProviderSuboperationReservation:
+        return self._runtime.agent_provider_call_reservation()
+
+    @property
+    def provider_admission_profile(self):
+        return self._runtime.agent_provider_admission_profile()
+
     async def decide(self, request: AgentRequest, cancellation: CancellationSignal):
         return await self._runtime.agent(request, cancellation)
 
@@ -138,10 +157,15 @@ class RealClaimExtractionModel:
 
 
 class RealVerificationModel:
-    def __init__(self, runtime: RealWorkflowRuntime) -> None:
+    def __init__(self, runtime: RealWorkflowRuntime, *, model_bundle_hash: str) -> None:
         self._runtime = runtime
+        self._model_bundle_hash = model_bundle_hash
 
-    async def generate(
+    @property
+    def model_bundle_hash(self) -> str:
+        return self._model_bundle_hash
+
+    async def invoke(
         self, request: VerificationModelRequest, cancellation: CancellationSignal
     ) -> VerificationModelResponse:
         return await self._runtime.verification(request, cancellation)
@@ -158,6 +182,18 @@ class RealTool:
     def descriptor(self) -> ToolDescriptor:
         return self._descriptor
 
+    @property
+    def provider_call_reservation(self) -> ProviderSuboperationReservation:
+        registry = self._runtime._registry
+        if registry is None:
+            raise RunConfigurationError("REAL capability registry is unavailable")
+        reservation = registry.resolve(
+            self._descriptor.capability_id
+        ).provider_call_reservation
+        if not isinstance(reservation, ProviderSuboperationReservation):
+            raise RunConfigurationError("REAL Tool reservation authority is invalid")
+        return reservation
+
     async def invoke(
         self, request: ToolInvocationRequest, cancellation: CancellationSignal
     ) -> ToolInvocationResult:
@@ -171,7 +207,7 @@ class RealTool:
         cancellation: CancellationSignal,
     ) -> ToolInvocationResult:
         run_id = self._runtime._require_run_id()
-        if envelope.request.run_id != run_id:
+        if envelope.invocation.run_id != run_id:
             raise RunConfigurationError("REAL tool request belongs to another Run")
         registry = self._runtime._registry
         if registry is None:

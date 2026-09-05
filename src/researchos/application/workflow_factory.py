@@ -369,7 +369,13 @@ class WorkflowFactory:
                 evidence_store=evidence_store,
                 artifact_store=verification_artifacts,
                 coordinator=VerificationCoordinator(
-                    model=RealVerificationModel(runtime), clock=clock
+                    model=RealVerificationModel(
+                        runtime,
+                        model_bundle_hash=settings.model_for_role("verification")
+                        .bundle()
+                        .model_bundle_hash,
+                    ),
+                    clock=clock,
                 ),
                 clock=clock,
                 trace_sink=trace,
