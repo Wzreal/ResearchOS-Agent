@@ -403,6 +403,18 @@ class OpenAICompatibleChatTransport:
                 "provider_request_too_large",
                 diagnostic=ProviderDispatchDiagnostic.NOT_DISPATCHED,
             )
+        if (
+            policy.input_reservation_basis == "enforced_utf8_input_limit_v1"
+            and len(encoded) > policy.max_input_tokens
+        ):
+            # The complete UTF-8 request body bounds every message plus fixed
+            # provider fields before HTTP dispatch.  One admission unit per
+            # byte is conservative; this local bound is not provider-reported
+            # token truth and never changes post-dispatch usage handling.
+            raise RealProviderFailure(
+                "provider_input_token_limit_exceeded",
+                diagnostic=ProviderDispatchDiagnostic.NOT_DISPATCHED,
+            )
         # HTTP byte size is only a transport bound and is not treated as a
         # tokenizer or provider-call admission contract. Admission uses the
         # separately frozen ProviderCallReservation.

@@ -95,6 +95,12 @@ def load_real_integration_settings(
     )
     enable_agent_tool_calls = enable_web_tools or enable_retrieval_tools
     models: list[RealModelSettings] = []
+    # This already-required explicit Phase 11 marker selects the stricter
+    # pre-dispatch UTF-8 admission path.  Its absence preserves Phase 9's
+    # context-capacity reservation semantics and frozen artifact hashes.
+    phase11_input_admission_enabled = bool(
+        values.get("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
+    )
     roles = ("agent", "planning", "verification")
     if require_phase10_roles:
         roles = ("agent", "planning", "claim_extraction", "verification")
@@ -122,6 +128,10 @@ def load_real_integration_settings(
                 required("RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS")
             ),
         }
+        if phase11_input_admission_enabled:
+            policy_overrides["input_reservation_basis"] = (
+                "enforced_utf8_input_limit_v1"
+            )
         if thinking_mode == "disabled":
             policy_overrides.update(
                 temperature=required("RESEARCHOS_TEMPERATURE"),

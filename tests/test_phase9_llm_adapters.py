@@ -1395,6 +1395,49 @@ def test_request_bound_is_checked_before_dispatch() -> None:
     assert sync.calls == []
 
 
+def test_phase11_input_admission_rejects_oversized_request_before_dispatch() -> None:
+    bound = _bound(
+        "planning",
+        policy_overrides={
+            "input_reservation_basis": "enforced_utf8_input_limit_v1",
+            "max_input_tokens": 1_024,
+        },
+    )
+    sync = SyncClient(_provider_envelope({"ok": True}))
+    transport = OpenAICompatibleChatTransport(
+        bound, sync_client=sync, async_client=AsyncClient(b"")
+    )
+    with pytest.raises(RealProviderFailure) as caught:
+        transport.complete(({"role": "user", "content": "x" * 2_000},))
+    assert caught.value.code == "provider_input_token_limit_exceeded"
+    assert caught.value.diagnostic is ProviderDispatchDiagnostic.NOT_DISPATCHED
+    assert caught.value.dispatched is False
+    assert sync.calls == []
+
+
+def test_phase11_input_admission_allows_under_limit_request_to_dispatch() -> None:
+    bound = _bound(
+        "planning",
+        policy_overrides={
+            "input_reservation_basis": "enforced_utf8_input_limit_v1",
+            "max_input_tokens": 1_024,
+        },
+    )
+    body = _provider_envelope(
+        {"ok": True},
+        model=bound.settings.model_id,
+        prompt_tokens=10,
+        completion_tokens=2,
+        total_tokens=12,
+    )
+    sync = SyncClient(body)
+    response = OpenAICompatibleChatTransport(
+        bound, sync_client=sync, async_client=AsyncClient(body)
+    ).complete(({"role": "user", "content": "safe"},))
+    assert response.diagnostic is ProviderDispatchDiagnostic.RESPONSE_RECEIVED
+    assert len(sync.calls) == 1
+
+
 def test_response_bound_streaming_rejects_without_retry() -> None:
     bound = _bound("planning", policy_overrides={"max_response_bytes": 10})
     sync = SyncClient(_provider_envelope({"ok": True}))

@@ -2,7 +2,9 @@
 
 ## Phase 11 REAL benchmark result template
 
-No Phase 11 paid benchmark has been run. When separately authorized, publish
+No Phase 11 paid benchmark has been run. Portfolio-v1 may publish one bounded,
+explicitly authorized REAL smoke result without claiming that all 12 cases were
+run. When separately authorized, publish
 the dataset/bundle/profile/configuration pins, exact commit, source policy,
 Run IDs, metric provenance, and observed cost/latency. Keep UNKNOWN or
 unavailable values explicit. `structural_selfcheck_v1` is not Phase 11 quality

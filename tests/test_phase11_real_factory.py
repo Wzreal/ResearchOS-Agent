@@ -19,6 +19,7 @@ from researchos.configuration.environment import (
 )
 from researchos.configuration.phase10_mock import build_phase10_mock_bundle_v1
 from researchos.configuration.phase11 import (
+    Phase11BatchCapacity,
     Phase11RealBenchmarkBundleV1,
     phase11_evaluation_policy,
     phase11_real_run_config,
@@ -31,6 +32,7 @@ from researchos.domain.contracts import (
     TraceEventType,
     model_sha256,
 )
+from researchos.domain.verification_runtime import max_model_calls
 
 
 def _settings():
@@ -52,6 +54,7 @@ def _settings():
         "RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS": "20000000",
         "RESEARCHOS_DEEPSEEK_BASE_ENDPOINT": "https://api.deepseek.com",
         "RESEARCHOS_DEEPSEEK_ADAPTER_VERSION": "v1",
+        "RESEARCHOS_REAL_CAPABILITIES": "web_search",
         "RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS": "90000",
         "RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS": "37",
     }
@@ -76,7 +79,9 @@ def _bundle(settings):
         benchmark=build_phase11_real_benchmark_v1(),
         evaluation_policy=phase11_evaluation_policy(profile),
         real_settings_hash=model_sha256(settings),
-        capability_ids=(),
+        capability_ids=tuple(
+            item.capability_id for item in settings.capability_settings
+        ),
         approved_refs=("main",),
         max_agent_steps=2,
         max_agent_tool_calls=1,
@@ -98,6 +103,47 @@ def test_build_real_constructs_without_network_or_credentials(tmp_path) -> None:
     )
     assert coordinator._planning_reservation.duration_milliseconds == 37
     assert not list(tmp_path.rglob("real_composition.json"))
+
+
+def test_phase11_input_admission_reserves_the_enforced_input_cap() -> None:
+    settings = _settings()
+    planning = settings.model_for_role("planning")
+    profile = planning.policy.pricing_safety_profile
+    reservation = planning.policy.provider_call_reservation
+    assert profile.context_window_tokens == 1_000_000
+    assert planning.policy.max_input_tokens == 32_768
+    assert planning.policy.input_reservation_basis == "enforced_utf8_input_limit_v1"
+    assert reservation.input_tokens == 32_768
+    assert reservation.output_tokens == 4_096
+    assert reservation.cost_microunits == (
+        32_768
+        * planning.policy.input_cost_upper_bound_microunits_per_million_tokens
+        + 4_096
+        * planning.policy.output_cost_upper_bound_microunits_per_million_tokens
+        + 999_999
+    ) // 1_000_000
+
+
+def test_phase11_single_case_reservation_fits_frozen_cost_ceiling() -> None:
+    settings = _settings()
+    bundle = _bundle(settings)
+    per_call = settings.model_for_role("planning").policy.provider_call_reservation
+    task_count = len(bundle.workflow_profile.execution.task_policies)
+    agent_calls = task_count * bundle.max_agent_steps
+    tavily_calls = task_count * bundle.max_agent_tool_calls
+    verification_calls = max_model_calls(bundle.workflow_profile.verification_policy)
+    case_reservation = (
+        per_call.cost_microunits
+        * (1 + agent_calls + 1 + verification_calls)
+        + tavily_calls
+        * settings.capability_settings[0].provider_reservation.cost_microunits
+    )
+    capacity = Phase11BatchCapacity(bundle.max_batch_cost_microunits)
+    capacity.reserve(case_reservation)
+    assert case_reservation < bundle.max_batch_cost_microunits
+    assert capacity.remaining_microunits == (
+        bundle.max_batch_cost_microunits - case_reservation
+    )
 
 
 def test_build_real_rejects_tampered_settings_pin(tmp_path) -> None:
@@ -198,6 +244,8 @@ def test_legacy_planning_settings_do_not_gain_phase11_total_timeout() -> None:
     planning = legacy.model_for_role("planning")
     assert planning.phase11_planning_total_timeout_enabled is False
     assert planning.policy.provider_total_call_timeout_ms is None
+    assert planning.policy.input_reservation_basis == "provider_context_window_v1"
+    assert planning.policy.provider_call_reservation.input_tokens == 1_000_000
 
 
 def test_phase11_real_evaluating_fresh_process_rebind_reuses_evaluation_without_resumed_trace(  # noqa: E501
@@ -205,7 +253,12 @@ def test_phase11_real_evaluating_fresh_process_rebind_reuses_evaluation_without_
 ) -> None:
     settings = _settings()
     bundle = _bundle(settings)
-    secrets = EnvironmentSecretSource({"researchos_deepseek_api_key": "offline-only"})
+    secrets = EnvironmentSecretSource(
+        {
+            "researchos_deepseek_api_key": "offline-only",
+            "researchos_tavily_api_key": "offline-only",
+        }
+    )
     original = WorkflowFactory(tmp_path).build_real(
         bundle=bundle, settings=settings, secrets=secrets
     )

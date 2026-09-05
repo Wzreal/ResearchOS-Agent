@@ -7,13 +7,18 @@ bundle, exact expected commit, clean approved ref, explicit acknowledgement,
 and explicit approved cost (USD 50 is a ceiling, not authorization):
 
 ```shell
-researchos run "approved question" --mode real --phase11-bundle <bundle.json> \
+researchos benchmark --phase11-bundle <bundle.json> \
   --expected-commit-sha <40-hex-sha> --approved-cost-microunits <value> \
-  --acknowledge-real
+  --acknowledge-real --case-id p11_citation_chain
 ```
 
-Record unavailable cost/latency as unavailable. Use one review per output,
-then a blinded second review for the stratified 50% subset and adjudicate.
+This is a limited portfolio-v1 smoke, not a full 12-case benchmark claim. Do
+not launch the remaining cases or either REAL ablation automatically. Record
+the first case's terminal state, provider/tool calls, input/output tokens,
+latency, measured or upper-bound cost, Evidence/citations, and verification
+outcome before seeking separate approval for any later REAL execution. Record
+unavailable cost/latency as unavailable. Use one review per output, then a
+blinded second review for the stratified 50% subset and adjudicate.
 
 This runbook is for the implemented Phase 9 and Phase 10 profiles. It does not authorize
 manual edits to durable JSON, provider retries, or Run-state guesses.

@@ -5,7 +5,8 @@
 - DONE - Add fixed 12-case benchmark, config-only REAL bundle, admission
   checks, deterministic four-case ablations, and review contracts.
 - DONE - Reuse REAL composition and Phase 7 artifact evaluation; no paid run.
-- TODO - Run the protected benchmark only after separate authorization.
+- TODO - After separate authorization, run at most one bounded portfolio REAL
+  smoke; do not automatically run the remaining cases or REAL ablations.
 
 Allowed states: **TODO**, **DOING**, **DONE**. A task becomes DONE only when its
 acceptance criteria and required tests pass. This file tracks implementation,

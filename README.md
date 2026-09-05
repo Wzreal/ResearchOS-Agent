@@ -79,7 +79,11 @@ Phase 11 evaluation evidence.
 Phase 11 adds an operator-only REAL benchmark path. It requires an explicit
 versioned bundle, exact checked-out commit, clean tree, approved ref,
 `--acknowledge-real`, and explicit `--approved-cost-microunits`; USD 50 is a
-hard ceiling, not spending approval. Ordinary tests never invoke a provider.
+hard ceiling, not spending approval. The frozen 12-case benchmark infrastructure
+is available for future release-quality evaluation, but portfolio-v1 permits
+only an explicitly authorized, bounded REAL smoke; it never automatically
+continues to the other cases or to REAL ablations. Ordinary tests never invoke
+a provider.
 
 ## Repository layout
 

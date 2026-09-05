@@ -1161,3 +1161,8 @@ not silently rewritten. If a decision changes, add a superseding ADR.
 - **Consequences:** A paid run requires an exact commit, clean tree, approved
   ref, acknowledgement, explicit cost approval, and the USD 50 hard ceiling.
   Human, reference, deterministic, and structural evidence remain distinct.
+  The explicit Phase 11 planning-timeout marker also selects a conservative
+  pre-dispatch UTF-8 request-input admission bound for all four Phase 11 model
+  roles. Only that selected policy may reserve the configured input cap;
+  legacy Phase 9 policies retain their provider-context-window reservation and
+  canonical hash preimage. Rejected oversized requests are `NOT_DISPATCHED`.

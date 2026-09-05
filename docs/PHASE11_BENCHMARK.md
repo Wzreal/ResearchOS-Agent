@@ -5,6 +5,14 @@ identity is the canonical `EvaluationDataset` version and content hash; source
 policy and reference annotations are explicit case metadata. The benchmark is
 not generated from provider output.
 
+Portfolio-v1 REAL validation is intentionally limited to one explicitly
+authorized selected case, initially `p11_citation_chain`. The other eleven
+frozen cases and both ablation datasets remain available, but are not run
+automatically. A further paid case requires separate operator approval after
+the first Run's terminal state, provider/tool usage, latency, cost provenance,
+Evidence/citations, and verification outcome have been reviewed. This limited
+validation is not a claim that the full benchmark has been REAL-executed.
+
 The two fixed four-case ablations are `max_rounds_1_vs_2` and
 `search_browser_vs_search_only`. Reuse a baseline REAL run only when its
 durable configuration, source policy, profile hash, and provenance match the
