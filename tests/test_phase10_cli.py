@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,8 +27,10 @@ def _tree_bytes(root):
 
 
 def _cli(*args: str) -> dict[str, object]:
+    scripts_dir = Path(sys.executable).parent
+    executable = scripts_dir / ("researchos.exe" if os.name == "nt" else "researchos")
     completed = subprocess.run(
-        [str(Path(sys.executable).with_name("researchos.exe")), *args],
+        [str(executable), *args],
         check=True,
         capture_output=True,
         text=True,
