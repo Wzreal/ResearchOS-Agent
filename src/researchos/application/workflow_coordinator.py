@@ -15,7 +15,9 @@ from researchos.application.workflow_evaluation import structural_selfcheck_requ
 from researchos.application.workflow_handoff import WorkflowHandoffManager
 from researchos.domain.claim_extraction_operation import ClaimExtractionOperationStatus
 from researchos.domain.contracts import (
+    ErrorCategory,
     RunConfig,
+    RunError,
     RunInput,
     RunState,
     RunStatus,
@@ -200,9 +202,21 @@ class WorkflowCoordinator:
             # A valid durable handoff is the only recoverable planning outcome.
             try:
                 self._handoffs.create_or_validate_checkpoint(state)
-            except Exception:
+            except Exception as exc:
                 return self._runs.finalize(
-                    state.run_id, RunStatus.FAILED, reason="planning_outcome_unknown"
+                    state.run_id,
+                    RunStatus.FAILED,
+                    reason="planning_outcome_unknown",
+                    errors=(
+                        self._planning_failure_error(
+                            state,
+                            code=getattr(exc, "code", "planning_outcome_unknown"),
+                            message=str(exc),
+                            retryable=False,
+                            category=ErrorCategory.LIFECYCLE,
+                            details={"planning_recovery": "handoff_missing_or_invalid"},
+                        ),
+                    ),
                 )
             return self._runs.load(state.run_id)
         admission = prepare_phase10_planning_admission(
@@ -218,8 +232,40 @@ class WorkflowCoordinator:
             state, self._profile.planning_policy, phase10_planning_admission=admission
         )
         if result.validated_dag is None:
+            planning_error = result.planning_error
             return self._runs.finalize(
-                state.run_id, RunStatus.FAILED, reason="planning_not_validated"
+                state.run_id,
+                RunStatus.FAILED,
+                reason="planning_not_validated",
+                errors=(
+                    self._planning_failure_error(
+                        state,
+                        code=(
+                            planning_error.code
+                            if planning_error is not None
+                            else "planning_not_validated"
+                        ),
+                        message=(
+                            planning_error.message
+                            if planning_error is not None
+                            else "planning did not produce a validated DAG"
+                        ),
+                        retryable=(
+                            planning_error.retryable
+                            if planning_error is not None
+                            else False
+                        ),
+                        category=(
+                            ErrorCategory.INTERNAL
+                            if planning_error is not None
+                            else ErrorCategory.VALIDATION
+                        ),
+                        details={
+                            "planning_status": result.status.value,
+                            "planning_request_id": result.planning_request_id,
+                        },
+                    ),
+                ),
             )
         policy = self._policies.build(
             result.validated_dag,
@@ -239,3 +285,25 @@ class WorkflowCoordinator:
         )
         self._handoffs.create_or_validate_checkpoint(state)
         return self._runs.load(state.run_id)
+
+    def _planning_failure_error(
+        self,
+        state: RunState,
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+        category: ErrorCategory,
+        details: dict[str, object],
+    ) -> RunError:
+        """Project the planner's typed failure into the existing Run error authority."""
+
+        return RunError(
+            error_id=stable_id("err", [state.run_id, "planning", code, message]),
+            code=code,
+            category=category,
+            message=message,
+            retryable=retryable,
+            occurred_at=self._clock.now(),
+            details=details,
+        )
