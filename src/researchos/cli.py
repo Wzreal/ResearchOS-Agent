@@ -343,6 +343,7 @@ def _benchmark_real(
     expected_commit_sha: str,
     approved_cost_microunits: int,
     acknowledge_real: bool,
+    case_id: str | None = None,
 ) -> dict[str, dict[str, str]]:
     """Run the fixed benchmark with one transient batch-cost admission."""
 
@@ -368,12 +369,17 @@ def _benchmark_real(
         approved_ref=_git_output("branch", "--show-current") in bundle.approved_refs,
         next_reservation_microunits=0,
     )
+    cases = bundle.benchmark.cases
+    if case_id is not None:
+        cases = tuple(item for item in cases if item.case_id == case_id)
+        if len(cases) != 1:
+            raise ValueError("Phase 11 benchmark case ID is unknown")
     settings = load_real_integration_settings(require_phase10_roles=True)
     config = phase11_real_run_config(bundle, settings)
     capacity = Phase11BatchCapacity(approved_cost_microunits)
     reservation = bundle.workflow_profile.budget.allocation.total.cost_microunits
     result: dict[str, dict[str, str]] = {}
-    for case in bundle.benchmark.cases:
+    for case in cases:
         capacity.reserve(reservation)
         factory = WorkflowFactory(root)
         coordinator = factory.build_real(
@@ -419,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     benchmark.add_argument("--expected-commit-sha", required=True)
     benchmark.add_argument("--approved-cost-microunits", type=int, required=True)
     benchmark.add_argument("--acknowledge-real", action="store_true", required=True)
+    benchmark.add_argument("--case-id")
     resume = commands.add_parser("resume")
     resume.add_argument("run_id")
     resume.add_argument("--outputs", default="outputs")
@@ -470,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
                     expected_commit_sha=args.expected_commit_sha,
                     approved_cost_microunits=args.approved_cost_microunits,
                     acknowledge_real=args.acknowledge_real,
+                    case_id=args.case_id,
                 ),
                 sort_keys=True,
             )

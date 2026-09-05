@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from researchos import cli
 from researchos.adapters.openai_compatible import OpenAICompatibleChatTransport
 from researchos.application.errors import RealProviderFailure
 from researchos.application.real_composition import BoundRealModel
@@ -260,3 +262,115 @@ def test_phase11_real_evaluating_fresh_process_rebind_reuses_evaluation_without_
         item.event_type for item in trace_before
     ] + [TraceEventType.TRANSITION_INTENT, TraceEventType.TRANSITION_COMMITTED]
     assert TraceEventType.RESUMED not in {item.event_type for item in trace_after}
+
+
+def _offline_benchmark_runner(monkeypatch, tmp_path):
+    settings = _settings()
+    bundle = _bundle(settings)
+    bundle_path = tmp_path / "phase11-bundle.json"
+    bundle_path.write_text(bundle.model_dump_json(), encoding="utf-8")
+    queries: list[str] = []
+    evaluations: list[tuple[str, str, str]] = []
+
+    class Coordinator:
+        async def create_and_execute(self, run_input, config):
+            del config
+            queries.append(run_input.query)
+            return SimpleNamespace(
+                run_id=f"run_{len(queries)}", status=RunStatus.COMPLETED
+            )
+
+    class Factory:
+        def __init__(self, root):
+            del root
+
+        def build_real(self, *, bundle, settings, secrets):
+            del settings, secrets
+            assert bundle.benchmark.dataset_id == "phase11_real_benchmark"
+            assert bundle.benchmark.dataset_version == "1"
+            return Coordinator()
+
+        async def evaluate_phase11(self, *, bundle, run_id, case_id, cancellation):
+            del cancellation
+            case = next(
+                item for item in bundle.benchmark.cases if item.case_id == case_id
+            )
+            evaluations.append((run_id, case_id, case.query))
+            return SimpleNamespace(eval_run_id=f"eval_{case_id}")
+
+    def git_output(*args):
+        if args == ("rev-parse", "HEAD"):
+            return bundle.system_commit_sha
+        if args == ("status", "--porcelain"):
+            return ""
+        if args == ("branch", "--show-current"):
+            return "main"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(cli, "WorkflowFactory", Factory)
+    monkeypatch.setattr(
+        cli, "load_real_integration_settings", lambda **_kwargs: settings
+    )
+    monkeypatch.setattr(cli, "_git_output", git_output)
+    return bundle, bundle_path, queries, evaluations
+
+
+def test_phase11_benchmark_case_id_runs_one_formal_case(monkeypatch, tmp_path) -> None:
+    bundle, bundle_path, queries, evaluations = _offline_benchmark_runner(
+        monkeypatch, tmp_path
+    )
+    result = cli._benchmark_real(
+        tmp_path,
+        bundle_path=bundle_path,
+        expected_commit_sha=bundle.system_commit_sha,
+        approved_cost_microunits=1_000,
+        acknowledge_real=True,
+        case_id="p11_citation_chain",
+    )
+    selected = next(
+        item for item in bundle.benchmark.cases if item.case_id == "p11_citation_chain"
+    )
+    assert tuple(result) == ("p11_citation_chain",)
+    assert queries == [selected.query]
+    assert evaluations == [("run_1", selected.case_id, selected.query)]
+
+
+def test_phase11_benchmark_case_id_rejects_unknown_before_real_composition(
+    monkeypatch, tmp_path
+) -> None:
+    bundle, bundle_path, queries, evaluations = _offline_benchmark_runner(
+        monkeypatch, tmp_path
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_real_integration_settings",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("settings loaded")),
+    )
+    with pytest.raises(ValueError, match="case ID is unknown"):
+        cli._benchmark_real(
+            tmp_path,
+            bundle_path=bundle_path,
+            expected_commit_sha=bundle.system_commit_sha,
+            approved_cost_microunits=1_000,
+            acknowledge_real=True,
+            case_id="unknown_case",
+        )
+    assert queries == []
+    assert evaluations == []
+
+
+def test_phase11_benchmark_without_case_id_preserves_all_twelve_cases(
+    monkeypatch, tmp_path
+) -> None:
+    bundle, bundle_path, queries, evaluations = _offline_benchmark_runner(
+        monkeypatch, tmp_path
+    )
+    result = cli._benchmark_real(
+        tmp_path,
+        bundle_path=bundle_path,
+        expected_commit_sha=bundle.system_commit_sha,
+        approved_cost_microunits=12_000,
+        acknowledge_real=True,
+    )
+    assert tuple(result) == tuple(item.case_id for item in bundle.benchmark.cases)
+    assert len(queries) == len(evaluations) == 12
