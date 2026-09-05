@@ -28,6 +28,9 @@ from researchos.interfaces.lifecycle import RealCompositionStore
 from researchos.interfaces.providers import SecretSource
 
 REQUIRED_PHASE9A_MODEL_ROLES = frozenset({"agent", "planning", "verification"})
+REQUIRED_PHASE10_MODEL_ROLES = REQUIRED_PHASE9A_MODEL_ROLES | {
+    "claim_extraction"
+}
 
 
 class PristineRealRunProbe(Protocol):
@@ -66,6 +69,7 @@ class RealCompositionManager:
         secrets: SecretSource,
         store: RealCompositionStore,
         pristine_probe: PristineRealRunProbe | None = None,
+        require_phase10_roles: bool = False,
     ) -> None:
         self._settings = RealIntegrationSettings.model_validate(
             settings.model_dump(mode="python")
@@ -73,6 +77,7 @@ class RealCompositionManager:
         self._secrets = secrets
         self._store = store
         self._pristine = pristine_probe or RejectMissingCompositionProbe()
+        self._require_phase10_roles = require_phase10_roles
         self._bindings: dict[str, str] = {}
         self._lock = RLock()
 
@@ -245,9 +250,14 @@ class RealCompositionManager:
 
     def _validate_config_compatibility(self, config: RunConfig) -> None:
         roles = frozenset(item.role_id for item in self._settings.models)
-        if roles != REQUIRED_PHASE9A_MODEL_ROLES:
+        required_roles = (
+            REQUIRED_PHASE10_MODEL_ROLES
+            if self._require_phase10_roles
+            else REQUIRED_PHASE9A_MODEL_ROLES
+        )
+        if roles != required_roles:
             raise RunConfigurationError(
-                "REAL composition requires planning, agent, and verification models"
+                "REAL composition model roles differ from the required profile"
             )
         if self._settings.source_policy_id != config.source_policy_id:
             raise RunConfigurationError("REAL source policy differs from Run config")

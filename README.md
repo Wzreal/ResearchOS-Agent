@@ -3,7 +3,7 @@
 ResearchOS Agent is a recoverable, verifiable multi-agent system for
 complex, long-running deep-research tasks.
 
-The project has completed Phases 0-8 and Phase 9A-9D plus release gates. It includes durable planning
+The project has completed Phases 0-10 and Phase 9A-9D plus release gates. It includes durable planning
 and DAG execution, Agent/Tool adapters, Evidence and Claim authorities, bounded
 verification, evaluation, resilience hardening, and an immutable REAL provider
 composition boundary with DeepSeek Planning/Agent/Verification adapters.
@@ -56,6 +56,25 @@ Phase 9A integration guard, immutable `real_composition.json`, process-local
 adapter binding, and credentials supplied outside durable artifacts. The
 default `RunManager` still rejects unconfigured REAL mode and never falls back
 to MOCK.
+
+Phase 10 exposes an explicit offline workflow:
+
+```shell
+researchos run "question" --mode mock
+researchos inspect <run_id>
+researchos resume <run_id>
+```
+
+`run` delegates to the filesystem-backed `WorkflowFactory` and
+`WorkflowCoordinator`, pinning `phase10_mock@1` and a
+`Phase10WorkflowProfileV1`. Resume reconstructs a fresh factory from durable
+authorities and fails closed on a profile mismatch; inspect is strictly
+read-only. Terminal resume is idempotent, while nonterminal resume rebuilds a
+fresh filesystem-backed factory and continues solely from persisted authorities.
+`--mode real` remains fail-closed without explicit Phase 10 REAL
+configuration and never falls back to MOCK. `structural_selfcheck_v1` is a
+deterministic structural self-check, not benchmark, factual-quality, human, or
+Phase 11 evaluation evidence.
 
 ## Repository layout
 

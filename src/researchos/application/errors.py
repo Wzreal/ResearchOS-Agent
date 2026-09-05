@@ -207,6 +207,45 @@ class RuntimeTraceCommitError(ResearchOSError):
         self.checkpoint_committed = True
 
 
+class WorkflowHandoffNotFound(ResearchOSError):
+    pass
+
+
+class WorkflowHandoffAlreadyExists(ResearchOSError):
+    pass
+
+
+class WorkflowHandoffRevisionConflict(ResearchOSError):
+    pass
+
+
+class CorruptWorkflowHandoff(ResearchOSError):
+    pass
+
+
+class WorkflowHandoffPersistenceError(ResearchOSError):
+    def __init__(self, message: str, *, run_id: str, handoff_replaced: bool) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.handoff_replaced = handoff_replaced
+
+
+class ClaimExtractionOperationNotFound(ResearchOSError):
+    pass
+
+
+class ClaimExtractionOperationAlreadyExists(ResearchOSError):
+    pass
+
+
+class ClaimExtractionOperationRevisionConflict(ResearchOSError):
+    pass
+
+
+class CorruptClaimExtractionOperation(ResearchOSError):
+    pass
+
+
 class ReplanLineageConflict(ResearchOSError):
     pass
 

@@ -28,6 +28,30 @@ class HangingSleeper:
         await asyncio.Future()
 
 
+def test_initialize_uses_explicit_execution_budget_limits() -> None:
+    example = runtime_example()
+    backend = MockTaskExecutionBackend({})
+    executor, _, store, _, _ = build_executor(example, backend)
+    execution_limits = RuntimeResourceAmount(
+        duration_milliseconds=2_000,
+        tokens=2_000,
+        cost_microunits=2_000,
+        tool_calls=2,
+    )
+
+    executor.initialize(
+        example.state,
+        example.dag,
+        example.policy,
+        replan_context=example.context,
+        budget_limits=execution_limits,
+    )
+
+    checkpoint = store.load(example.state.run_id)
+    assert checkpoint.budget.limits == execution_limits
+    assert checkpoint.budget.consumed == RuntimeResourceAmount()
+
+
 def success_fixtures() -> dict[ExecutionFixtureKey, ExecutionFixture]:
     usage = RuntimeResourceAmount(
         duration_milliseconds=10, tokens=10, cost_microunits=10

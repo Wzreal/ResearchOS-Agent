@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from researchos.adapters._atomic_file import fsync_parent
+from researchos.adapters._atomic_file import _native_path, fsync_parent
 from researchos.application.errors import (
     CorruptEvaluationArtifact,
     EvaluationArtifactConflict,
@@ -164,6 +164,8 @@ class FilesystemEvaluationArtifactStore:
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.parent / f".{uuid4().hex[:16]}.tmp"
+        temp = _native_path(temp)
+        path = _native_path(path)
         created = False
         try:
             self._fault(f"{stage}.before_temp_write")

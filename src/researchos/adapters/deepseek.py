@@ -33,6 +33,11 @@ from researchos.domain.agent import (
     AgentFailedDecision,
     AgentRequest,
 )
+from researchos.domain.claim_extraction import (
+    ClaimExtractionModelResult,
+    ClaimExtractionRequest,
+    ClaimExtractionResponse,
+)
 from researchos.domain.planning import PlanningModelResponse, PlanningRequest
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 from researchos.domain.synthesis import (
@@ -154,6 +159,82 @@ class DeepSeekPlanningModel:
         if failure is not None:
             raise failure
         raise AssertionError("planning provider exited without a result")
+
+
+class DeepSeekClaimExtractionModel:
+    """Phase 10 strict ClaimExtractionModel over the existing provider port."""
+
+    def __init__(
+        self,
+        bound: BoundRealModel,
+        transport: OpenAICompatibleChatTransport,
+        authorizer: ProviderDispatchAuthorizer,
+        workflow_budget_slice: RuntimeResourceAmount,
+    ) -> None:
+        _validate_binding(bound, "claim_extraction")
+        self._bound = bound
+        self._transport = transport
+        self._authorizer = authorizer
+        self._workflow_budget_slice = workflow_budget_slice
+
+    @property
+    def model_bundle_hash(self) -> str:
+        return self._bound.bundle.model_bundle_hash
+
+    @property
+    def provider_call_reservation(self):
+        return self._bound.settings.suboperation_reservation()
+
+    def close(self) -> None:
+        self._transport.close()
+
+    def generate(self, request: ClaimExtractionRequest) -> ClaimExtractionModelResult:
+        if request.run_id != self._bound.run_id:
+            raise PlanningModelFailure(
+                "provider_run_mismatch",
+                "claim extraction request belongs to another Run",
+            )
+        self._authorizer.authorize(
+            run_id=self._bound.run_id,
+            role_id="claim_extraction",
+            composition_hash=self._bound.composition_hash,
+        )
+        reservation = self.provider_call_reservation
+        requested = RuntimeResourceAmount(
+            duration_milliseconds=reservation.duration_milliseconds,
+            tokens=reservation.tokens,
+            cost_microunits=reservation.cost_microunits,
+            tool_calls=reservation.tool_calls,
+        )
+        if not requested.fits_within(self._workflow_budget_slice):
+            raise PlanningModelFailure(
+                "provider_call_reservation_exceeds_claim_extraction_slice",
+                "claim extraction provider reservation exceeds workflow budget slice",
+            )
+        try:
+            response = self._transport.complete(_messages("claim_extraction", request))
+            payload = json.loads(response.content)
+            if not isinstance(payload, dict):
+                raise ValueError
+            return ClaimExtractionModelResult(
+                response=ClaimExtractionResponse.model_validate(payload),
+                usage=response.usage,
+                usage_certainty=response.usage_certainty,
+            )
+        except RealProviderFailure as exc:
+            raise PlanningModelFailure(
+                exc.code,
+                "claim extraction provider failed",
+                retryable=exc.retryable,
+                usage=exc.usage,
+                usage_certainty=exc.usage_certainty,
+            ) from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PlanningModelFailure(
+                "provider_response_invalid",
+                "claim extraction provider response is invalid",
+                retryable=False,
+            ) from exc
 
 
 class DeepSeekAgent:

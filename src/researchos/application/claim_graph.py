@@ -212,6 +212,19 @@ class ClaimGraphService:
         )
         return ClaimView(claim=record, revision=revision)
 
+    def mutation_receipt(
+        self, run_id: str, operation_key: str
+    ) -> ClaimMutationReceipt | None:
+        """Read one immutable receipt without changing ClaimGraph authority."""
+        try:
+            snapshot = self._store.load(run_id)
+        except ClaimGraphNotFound:
+            return None
+        return next(
+            (item for item in snapshot.receipts if item.operation_key == operation_key),
+            None,
+        )
+
     def revise_claim(
         self,
         *,
