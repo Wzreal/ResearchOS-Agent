@@ -150,6 +150,6 @@ def test_phase10_mock_factory_rejects_unknown_bundle_identity(tmp_path) -> None:
 
 
 def test_phase10_real_cli_fails_closed_before_provider_composition(tmp_path) -> None:
-    with pytest.raises(SystemExit, match="REAL workflow profile/config is required"):
+    with pytest.raises(SystemExit, match="REAL requires --phase11-bundle"):
         main(["run", "fixed question", "--mode", "real", "--outputs", str(tmp_path)])
     assert _tree_bytes(tmp_path) == {}

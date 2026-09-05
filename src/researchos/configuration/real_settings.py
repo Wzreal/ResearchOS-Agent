@@ -162,6 +162,9 @@ class RealModelSettings(ContractModel):
     ]
     policy: ModelCallPolicySnapshot
     credential_slot_id: SafeId
+    # This opt-in exists solely for the Phase 11 REAL planning profile.  Older
+    # planning profiles retain their socket-read timeout semantics.
+    phase11_planning_total_timeout_enabled: bool = False
 
     @field_validator("base_endpoint")
     @classmethod
@@ -176,18 +179,29 @@ class RealModelSettings(ContractModel):
             self.model_id
         ):
             raise ValueError("pricing safety profile differs from adapter authority")
-        requires_suboperation_timeout = self.response_contract_version in {
-            "agent-tool-decision-v2",
-            "agent-tool-decision-v3",
-            "claim-extraction-response-v1",
-        }
+        requires_suboperation_timeout = (
+            self.response_contract_version
+            in {
+                "agent-tool-decision-v2",
+                "agent-tool-decision-v3",
+                "claim-extraction-response-v1",
+            }
+        )
+        phase11_planning_timeout = (
+            self.role_id == "planning"
+            and self.phase11_planning_total_timeout_enabled
+        )
+        if self.phase11_planning_total_timeout_enabled and self.role_id != "planning":
+            raise ValueError(
+                "only the Phase 11 planning profile may opt into a total timeout"
+            )
         if (
-            requires_suboperation_timeout
+            (requires_suboperation_timeout or phase11_planning_timeout)
             and self.policy.provider_total_call_timeout_ms is None
         ):
             raise ValueError("provider suboperation profile requires a total timeout")
         if (
-            not requires_suboperation_timeout
+            not (requires_suboperation_timeout or phase11_planning_timeout)
             and self.policy.provider_total_call_timeout_ms is not None
         ):
             raise ValueError(
@@ -214,13 +228,14 @@ class RealModelSettings(ContractModel):
 
     def suboperation_reservation(self) -> ProviderSuboperationReservation:
         reservation = self.policy.provider_call_reservation
-        if self.policy.provider_total_call_timeout_ms is None:
+        duration = self.policy.provider_total_call_timeout_ms
+        if duration is None:
             raise ValueError(
                 "provider suboperation timeout is unavailable for this profile"
             )
         return ProviderSuboperationReservation.build(
             reservation_version="deepseek-provider-suboperation-v1",
-            duration_milliseconds=self.policy.provider_total_call_timeout_ms,
+            duration_milliseconds=duration,
             tokens=reservation.total_tokens,
             cost_microunits=reservation.cost_microunits,
             cost_currency=reservation.cost_currency,

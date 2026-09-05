@@ -1,5 +1,20 @@
 # ResearchOS Operator Runbook
 
+## Phase 11 protected REAL benchmark
+
+Do not use this in CI or ordinary development. Provide a validated Phase 11
+bundle, exact expected commit, clean approved ref, explicit acknowledgement,
+and explicit approved cost (USD 50 is a ceiling, not authorization):
+
+```shell
+researchos run "approved question" --mode real --phase11-bundle <bundle.json> \
+  --expected-commit-sha <40-hex-sha> --approved-cost-microunits <value> \
+  --acknowledge-real
+```
+
+Record unavailable cost/latency as unavailable. Use one review per output,
+then a blinded second review for the stratified 50% subset and adjudicate.
+
 This runbook is for the implemented Phase 9 and Phase 10 profiles. It does not authorize
 manual edits to durable JSON, provider retries, or Run-state guesses.
 

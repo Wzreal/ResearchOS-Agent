@@ -36,6 +36,8 @@ class EnvironmentSecretSource:
 
 def load_real_integration_settings(
     environ: Mapping[str, str] | None = None,
+    *,
+    require_phase10_roles: bool = False,
 ) -> RealIntegrationSettings:
     values = environ if environ is not None else os.environ
 
@@ -93,11 +95,12 @@ def load_real_integration_settings(
     )
     enable_agent_tool_calls = enable_web_tools or enable_retrieval_tools
     models: list[RealModelSettings] = []
-    for role in ("agent", "planning", "verification"):
+    roles = ("agent", "planning", "verification")
+    if require_phase10_roles:
+        roles = ("agent", "planning", "claim_extraction", "verification")
+    for role in roles:
         model_id = required(f"RESEARCHOS_DEEPSEEK_{role.upper()}_MODEL")
-        thinking_mode = required(
-            f"RESEARCHOS_DEEPSEEK_{role.upper()}_THINKING_MODE"
-        )
+        thinking_mode = required(f"RESEARCHOS_DEEPSEEK_{role.upper()}_THINKING_MODE")
         policy_overrides: dict[str, object] = {
             "max_input_tokens": int(required("RESEARCHOS_MAX_INPUT_TOKENS")),
             "max_output_tokens": int(required("RESEARCHOS_MAX_OUTPUT_TOKENS")),
@@ -111,9 +114,7 @@ def load_real_integration_settings(
             "max_cost_microunits_per_call": int(
                 required("RESEARCHOS_MAX_COST_MICROUNITS_PER_CALL")
             ),
-            "pricing_policy_version": required(
-                "RESEARCHOS_PRICING_POLICY_VERSION"
-            ),
+            "pricing_policy_version": required("RESEARCHOS_PRICING_POLICY_VERSION"),
             "input_cost_upper_bound_microunits_per_million_tokens": int(
                 required("RESEARCHOS_INPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS")
             ),
@@ -129,6 +130,17 @@ def load_real_integration_settings(
         if role == "agent" and enable_agent_tool_calls:
             policy_overrides["provider_total_call_timeout_ms"] = int(
                 required("RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS")
+            )
+        if role == "claim_extraction" and require_phase10_roles:
+            policy_overrides["provider_total_call_timeout_ms"] = int(
+                required("RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS")
+            )
+        phase11_planning_total_timeout_enabled = role == "planning" and bool(
+            values.get("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
+        )
+        if phase11_planning_total_timeout_enabled:
+            policy_overrides["provider_total_call_timeout_ms"] = int(
+                required("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
             )
         policy = default_deepseek_policy(
             model_id=model_id,
@@ -150,23 +162,22 @@ def load_real_integration_settings(
                 prompt_content_hash=deepseek_prompt_content_hash(
                     role,
                     enable_web_tools=(role == "agent" and enable_web_tools),
-                    enable_retrieval_tools=(
-                        role == "agent" and enable_retrieval_tools
-                    ),
+                    enable_retrieval_tools=(role == "agent" and enable_retrieval_tools),
                 ),
                 response_contract_version=deepseek_response_contract(
                     role,
                     enable_web_tools=(role == "agent" and enable_web_tools),
-                    enable_retrieval_tools=(
-                        role == "agent" and enable_retrieval_tools
-                    ),
+                    enable_retrieval_tools=(role == "agent" and enable_retrieval_tools),
                 ),
                 policy=policy,
                 credential_slot_id=credential_slot_id,
+                phase11_planning_total_timeout_enabled=(
+                    phase11_planning_total_timeout_enabled
+                ),
             )
         )
     return RealIntegrationSettings(
-        models=tuple(models),
+        models=tuple(sorted(models, key=lambda item: item.role_id)),
         capabilities=tuple(item.pin() for item in capability_settings),
         capability_settings=capability_settings,
     )

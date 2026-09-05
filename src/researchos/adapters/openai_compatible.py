@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
+from threading import Event
 from typing import Any, Protocol
 
 from researchos.application.errors import (
@@ -128,6 +131,14 @@ class OpenAICompatibleChatTransport:
     def complete(self, messages: tuple[dict[str, str], ...]) -> ChatTransportResponse:
         request = self._request_bytes(messages)
         started = time.perf_counter_ns()
+        total_timeout_ms = self._bound.settings.policy.provider_total_call_timeout_ms
+        if self._bound.settings.phase11_planning_total_timeout_enabled:
+            assert total_timeout_ms is not None
+            return self._complete_sync_with_total_timeout(
+                request=request,
+                started_ns=started,
+                timeout_seconds=total_timeout_ms / 1_000,
+            )
         failure: RealProviderFailure | None = None
         try:
             assert self._sync_client is not None
@@ -149,6 +160,71 @@ class OpenAICompatibleChatTransport:
         if failure is not None:
             raise failure
         return self._parse(raw, response.status_code, started)
+
+    def _complete_sync_with_total_timeout(
+        self,
+        *,
+        request: bytes,
+        started_ns: int,
+        timeout_seconds: float,
+    ) -> ChatTransportResponse:
+        """Bound one synchronous provider operation, including response reading.
+
+        The normal httpx read timeout only bounds idle socket reads.  Phase 11
+        planning opts into the frozen provider-total timeout, which bounds the
+        entire dispatched operation.  An owned client is closed on expiry to
+        request cancellation of the underlying transport; an injected test
+        client is deliberately not owned or closed.
+        """
+
+        dispatched = Event()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._send_sync, request, dispatched)
+        try:
+            raw, status_code = future.result(timeout=timeout_seconds)
+        except TimeoutError as exc:
+            if self._owns_sync_client and self._sync_client is not None:
+                with suppress(Exception):
+                    self._sync_client.close()
+                self._sync_closed = True
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise RealProviderFailure(
+                "provider_total_call_timeout",
+                diagnostic=(
+                    ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN
+                    if dispatched.is_set()
+                    else ProviderDispatchDiagnostic.NOT_DISPATCHED
+                ),
+            ) from exc
+        except RealProviderFailure:
+            raise
+        except Exception as exc:
+            raise RealProviderFailure(
+                "provider_transport_failed",
+                diagnostic=(
+                    ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN
+                    if dispatched.is_set()
+                    else ProviderDispatchDiagnostic.NOT_DISPATCHED
+                ),
+                retryable=dispatched.is_set(),
+            ) from exc
+        finally:
+            if future.done():
+                executor.shutdown(wait=False, cancel_futures=True)
+        return self._parse(raw, status_code, started_ns)
+
+    def _send_sync(
+        self, request: bytes, dispatched: Event
+    ) -> tuple[bytes, int]:
+        assert self._sync_client is not None
+        dispatched.set()
+        with self._sync_client.stream(
+            "POST",
+            self._url(),
+            content=request,
+            headers=self._headers(),
+        ) as response:
+            return self._read_sync(response), response.status_code
 
     async def complete_async(
         self,

@@ -53,6 +53,8 @@ class WorkflowCoordinator:
         mock_bundle_version: str | None = None,
         mock_bundle_hash: str | None = None,
         planning_reservation: object | None = None,
+        runtime_binder: Callable[[RunState], None] | None = None,
+        evaluating_rebinder: Callable[[RunState], None] | None = None,
     ) -> None:
         self._runs = runs
         self._planner = planner
@@ -71,6 +73,8 @@ class WorkflowCoordinator:
         self._mock_bundle_version = mock_bundle_version
         self._mock_bundle_hash = mock_bundle_hash
         self._planning_reservation = planning_reservation
+        self._runtime_binder = runtime_binder
+        self._evaluating_rebinder = evaluating_rebinder
 
     async def create_and_execute(
         self, run_input: RunInput, config: RunConfig
@@ -96,6 +100,8 @@ class WorkflowCoordinator:
         # not append RunManager's RESUMED event in the post-publication crash
         # window: evaluating the same request will load the published authority.
         if state.status is RunStatus.EVALUATING:
+            if self._evaluating_rebinder is not None:
+                self._evaluating_rebinder(state)
             return await self.execute(state)
         resumed = self._runs.resume(
             run_id, expected_input=expected_input, expected_config=expected_config
@@ -105,6 +111,8 @@ class WorkflowCoordinator:
     async def execute(self, state: RunState) -> RunState:
         """Advance one Run; no stage cursor is retained on this object."""
         state = self._runs.load(state.run_id)
+        if self._runtime_binder is not None:
+            self._runtime_binder(state)
         if state.status in {
             RunStatus.COMPLETED,
             RunStatus.PARTIAL,

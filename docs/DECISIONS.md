@@ -1149,3 +1149,15 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   10 evaluation, `structural_selfcheck_v1`, rebuilds a structural-only dataset
   from persisted input and profile through the unchanged Phase 7 harness. It is
   not benchmark, factual, or human quality evidence.
+
+## ADR-0032: Phase 11 reuses existing evaluation and REAL authorities
+
+- **Status:** Accepted
+- **Date:** 2026-09-05
+- **Decision:** Phase 11 adds configuration, deterministic datasets, and
+  read-only projections only. It reuses Phase 7 frozen artifacts and the
+  existing REAL composition/factory boundary; it adds no lifecycle, budget, or
+  measurement authority.
+- **Consequences:** A paid run requires an exact commit, clean tree, approved
+  ref, acknowledgement, explicit cost approval, and the USD 50 hard ceiling.
+  Human, reference, deterministic, and structural evidence remain distinct.

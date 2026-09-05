@@ -76,6 +76,11 @@ configuration and never falls back to MOCK. `structural_selfcheck_v1` is a
 deterministic structural self-check, not benchmark, factual-quality, human, or
 Phase 11 evaluation evidence.
 
+Phase 11 adds an operator-only REAL benchmark path. It requires an explicit
+versioned bundle, exact checked-out commit, clean tree, approved ref,
+`--acknowledge-real`, and explicit `--approved-cost-microunits`; USD 50 is a
+hard ceiling, not spending approval. Ordinary tests never invoke a provider.
+
 ## Repository layout
 
 ```text

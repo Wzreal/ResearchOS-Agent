@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from researchos.adapters._snapshot_jsonl import decode_snapshot
+from researchos.adapters.sleeper import AsyncioRunCancellationController
 from researchos.application.doctor import RealDoctor
 from researchos.application.workflow_factory import WorkflowFactory
 from researchos.configuration.environment import (
@@ -19,6 +21,13 @@ from researchos.configuration.environment import (
 )
 from researchos.configuration.observability import load_otlp_http_settings
 from researchos.configuration.phase10_mock import build_phase10_mock_bundle_v1
+from researchos.configuration.phase11 import (
+    Phase11BatchCapacity,
+    Phase11PaidAdmission,
+    Phase11RealBenchmarkBundleV1,
+    phase11_real_run_config,
+    require_paid_admission,
+)
 from researchos.domain.claim_extraction_operation import (
     ClaimExtractionOperationEnvelope,
 )
@@ -209,15 +218,11 @@ def _resume_mock(root: str | Path, run_id: str) -> dict[str, str]:
     if handoff_result.get("status") == "corrupt":
         raise ValueError("persisted workflow profile differs from phase10_mock@1")
     handoff = handoff_result.get("value")
-    if (
-        handoff is not None
-        and (
-            handoff.handoff.workflow_profile_hash
-            != bundle.workflow_profile.profile_hash
-            or handoff.handoff.mock_bundle_id != bundle.bundle_id
-            or handoff.handoff.mock_bundle_version != bundle.bundle_version
-            or handoff.handoff.mock_bundle_hash != bundle.bundle_hash
-        )
+    if handoff is not None and (
+        handoff.handoff.workflow_profile_hash != bundle.workflow_profile.profile_hash
+        or handoff.handoff.mock_bundle_id != bundle.bundle_id
+        or handoff.handoff.mock_bundle_version != bundle.bundle_version
+        or handoff.handoff.mock_bundle_hash != bundle.bundle_hash
     ):
         raise ValueError("persisted workflow profile differs from phase10_mock@1")
     coordinator = WorkflowFactory(base).build_mock(
@@ -233,6 +238,166 @@ def _resume_mock(root: str | Path, run_id: str) -> dict[str, str]:
     return _mock_result(resumed)
 
 
+def _resume_real(
+    root: str | Path,
+    run_id: str,
+    *,
+    bundle_path: str | Path,
+    expected_commit_sha: str,
+    approved_cost_microunits: int,
+    acknowledge_real: bool,
+) -> dict[str, str]:
+    base = Path(root).resolve()
+    state_result = _read_json(base / run_id / "run_state.json", RunState)
+    state = state_result.get("value")
+    if not isinstance(state, RunState) or state.config.mode is not OperatingMode.REAL:
+        raise ValueError("persisted Run is not resumable as Phase 11 REAL")
+    bundle = Phase11RealBenchmarkBundleV1.model_validate_json(
+        Path(bundle_path).read_bytes()
+    )
+    current_commit_sha = _git_output("rev-parse", "HEAD")
+    admission = Phase11PaidAdmission(
+        expected_commit_sha=expected_commit_sha,
+        approved_cost_microunits=approved_cost_microunits,
+        real_acknowledged=acknowledge_real,
+    )
+    if (
+        expected_commit_sha != current_commit_sha
+        or current_commit_sha != bundle.system_commit_sha
+        or bundle.system_commit_sha != bundle.workflow_profile.system_commit_sha
+    ):
+        raise ValueError("expected HEAD and Phase 11 bundle commit pins must match")
+    require_paid_admission(
+        admission,
+        current_commit_sha=current_commit_sha,
+        is_clean=not _git_output("status", "--porcelain"),
+        approved_ref=_git_output("branch", "--show-current") in bundle.approved_refs,
+        next_reservation_microunits=0,
+    )
+    settings = load_real_integration_settings(require_phase10_roles=True)
+    config = phase11_real_run_config(bundle, settings)
+    coordinator = WorkflowFactory(base).build_real(
+        bundle=bundle, settings=settings, secrets=EnvironmentSecretSource()
+    )
+    resumed = asyncio.run(
+        coordinator.resume_and_execute(
+            run_id,
+            expected_input=RunInput(query=state.input_snapshot.query),
+            expected_config=config,
+        )
+    )
+    return {"run_id": resumed.run_id, "status": resumed.status.value}
+
+
+def _git_output(*args: str) -> str:
+    result = subprocess.run(["git", *args], capture_output=True, check=True, text=True)
+    return result.stdout.strip()
+
+
+def _run_real(
+    root: str | Path,
+    query: str,
+    *,
+    bundle_path: str | Path,
+    expected_commit_sha: str,
+    approved_cost_microunits: int,
+    acknowledge_real: bool,
+) -> dict[str, str]:
+    """Execute only after all non-provider Phase 11 admissions succeed."""
+
+    bundle = Phase11RealBenchmarkBundleV1.model_validate_json(
+        Path(bundle_path).read_bytes()
+    )
+    settings = load_real_integration_settings(require_phase10_roles=True)
+    admission = Phase11PaidAdmission(
+        expected_commit_sha=expected_commit_sha,
+        approved_cost_microunits=approved_cost_microunits,
+        real_acknowledged=acknowledge_real,
+    )
+    current_commit_sha = _git_output("rev-parse", "HEAD")
+    if (
+        expected_commit_sha != current_commit_sha
+        or current_commit_sha != bundle.system_commit_sha
+        or bundle.system_commit_sha != bundle.workflow_profile.system_commit_sha
+    ):
+        raise ValueError("expected HEAD and Phase 11 bundle commit pins must match")
+    require_paid_admission(
+        admission,
+        current_commit_sha=current_commit_sha,
+        is_clean=not _git_output("status", "--porcelain"),
+        approved_ref=_git_output("branch", "--show-current") in bundle.approved_refs,
+        next_reservation_microunits=bundle.workflow_profile.budget.allocation.total.cost_microunits,
+    )
+    config = phase11_real_run_config(bundle, settings)
+    coordinator = WorkflowFactory(root).build_real(
+        bundle=bundle, settings=settings, secrets=EnvironmentSecretSource()
+    )
+    state = asyncio.run(coordinator.create_and_execute(RunInput(query=query), config))
+    return {"run_id": state.run_id, "status": state.status.value}
+
+
+def _benchmark_real(
+    root: str | Path,
+    *,
+    bundle_path: str | Path,
+    expected_commit_sha: str,
+    approved_cost_microunits: int,
+    acknowledge_real: bool,
+) -> dict[str, dict[str, str]]:
+    """Run the fixed benchmark with one transient batch-cost admission."""
+
+    bundle = Phase11RealBenchmarkBundleV1.model_validate_json(
+        Path(bundle_path).read_bytes()
+    )
+    current = _git_output("rev-parse", "HEAD")
+    if (
+        expected_commit_sha != current
+        or current != bundle.system_commit_sha
+        or current != bundle.workflow_profile.system_commit_sha
+    ):
+        raise ValueError("expected HEAD and Phase 11 bundle commit pins must match")
+    admission = Phase11PaidAdmission(
+        expected_commit_sha=expected_commit_sha,
+        approved_cost_microunits=approved_cost_microunits,
+        real_acknowledged=acknowledge_real,
+    )
+    require_paid_admission(
+        admission,
+        current_commit_sha=current,
+        is_clean=not _git_output("status", "--porcelain"),
+        approved_ref=_git_output("branch", "--show-current") in bundle.approved_refs,
+        next_reservation_microunits=0,
+    )
+    settings = load_real_integration_settings(require_phase10_roles=True)
+    config = phase11_real_run_config(bundle, settings)
+    capacity = Phase11BatchCapacity(approved_cost_microunits)
+    reservation = bundle.workflow_profile.budget.allocation.total.cost_microunits
+    result: dict[str, dict[str, str]] = {}
+    for case in bundle.benchmark.cases:
+        capacity.reserve(reservation)
+        factory = WorkflowFactory(root)
+        coordinator = factory.build_real(
+            bundle=bundle, settings=settings, secrets=EnvironmentSecretSource()
+        )
+        state = asyncio.run(
+            coordinator.create_and_execute(RunInput(query=case.query), config)
+        )
+        evaluation = asyncio.run(
+            factory.evaluate_phase11(
+                bundle=bundle,
+                run_id=state.run_id,
+                case_id=case.case_id,
+                cancellation=AsyncioRunCancellationController().signal_for_attempt(),
+            )
+        )
+        result[case.case_id] = {
+            "run_id": state.run_id,
+            "status": state.status.value,
+            "eval_run_id": evaluation.eval_run_id,
+        }
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="researchos")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -244,9 +409,23 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("question")
     run.add_argument("--mode", choices=("mock", "real"), required=True)
     run.add_argument("--outputs", default="outputs")
+    run.add_argument("--phase11-bundle")
+    run.add_argument("--expected-commit-sha")
+    run.add_argument("--approved-cost-microunits", type=int)
+    run.add_argument("--acknowledge-real", action="store_true")
+    benchmark = commands.add_parser("benchmark")
+    benchmark.add_argument("--outputs", default="outputs")
+    benchmark.add_argument("--phase11-bundle", required=True)
+    benchmark.add_argument("--expected-commit-sha", required=True)
+    benchmark.add_argument("--approved-cost-microunits", type=int, required=True)
+    benchmark.add_argument("--acknowledge-real", action="store_true", required=True)
     resume = commands.add_parser("resume")
     resume.add_argument("run_id")
     resume.add_argument("--outputs", default="outputs")
+    resume.add_argument("--phase11-bundle")
+    resume.add_argument("--expected-commit-sha")
+    resume.add_argument("--approved-cost-microunits", type=int)
+    resume.add_argument("--acknowledge-real", action="store_true")
     inspect = commands.add_parser("inspect")
     inspect.add_argument("run_id")
     inspect.add_argument("--outputs", default="outputs")
@@ -256,10 +435,78 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         if args.mode == "real":
-            raise SystemExit("Phase 10 REAL workflow profile/config is required")
+            if (
+                args.phase11_bundle is None
+                or args.expected_commit_sha is None
+                or args.approved_cost_microunits is None
+                or not args.acknowledge_real
+            ):
+                raise SystemExit(
+                    "REAL requires --phase11-bundle, --expected-commit-sha, "
+                    "--approved-cost-microunits, and --acknowledge-real"
+                )
+            print(
+                json.dumps(
+                    _run_real(
+                        args.outputs,
+                        args.question,
+                        bundle_path=args.phase11_bundle,
+                        expected_commit_sha=args.expected_commit_sha,
+                        approved_cost_microunits=args.approved_cost_microunits,
+                        acknowledge_real=args.acknowledge_real,
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return 0
         print(json.dumps(_run_mock(args.outputs, args.question), sort_keys=True))
         return 0
+    if args.command == "benchmark":
+        print(
+            json.dumps(
+                _benchmark_real(
+                    args.outputs,
+                    bundle_path=args.phase11_bundle,
+                    expected_commit_sha=args.expected_commit_sha,
+                    approved_cost_microunits=args.approved_cost_microunits,
+                    acknowledge_real=args.acknowledge_real,
+                ),
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.command == "resume":
+        persisted = _read_json(
+            Path(args.outputs).resolve() / args.run_id / "run_state.json", RunState
+        ).get("value")
+        if (
+            isinstance(persisted, RunState)
+            and persisted.config.mode is OperatingMode.REAL
+        ):
+            if (
+                args.phase11_bundle is None
+                or args.expected_commit_sha is None
+                or args.approved_cost_microunits is None
+                or not args.acknowledge_real
+            ):
+                raise SystemExit(
+                    "REAL resume requires --phase11-bundle, --expected-commit-sha, "
+                    "--approved-cost-microunits, and --acknowledge-real"
+                )
+            print(
+                json.dumps(
+                    _resume_real(
+                        args.outputs,
+                        args.run_id,
+                        bundle_path=args.phase11_bundle,
+                        expected_commit_sha=args.expected_commit_sha,
+                        approved_cost_microunits=args.approved_cost_microunits,
+                        acknowledge_real=args.acknowledge_real,
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return 0
         print(json.dumps(_resume_mock(args.outputs, args.run_id), sort_keys=True))
         return 0
     if args.command in {"run", "resume"}:

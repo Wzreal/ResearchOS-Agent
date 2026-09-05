@@ -1,5 +1,12 @@
 # ResearchOS Agent Task Board
 
+## Phase 11 - REAL Evaluation & Quality
+
+- DONE - Add fixed 12-case benchmark, config-only REAL bundle, admission
+  checks, deterministic four-case ablations, and review contracts.
+- DONE - Reuse REAL composition and Phase 7 artifact evaluation; no paid run.
+- TODO - Run the protected benchmark only after separate authorization.
+
 Allowed states: **TODO**, **DOING**, **DONE**. A task becomes DONE only when its
 acceptance criteria and required tests pass. This file tracks implementation,
 not aspiration.
