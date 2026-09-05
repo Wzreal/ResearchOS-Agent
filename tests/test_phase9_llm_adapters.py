@@ -1395,6 +1395,19 @@ def test_request_bound_is_checked_before_dispatch() -> None:
     assert sync.calls == []
 
 
+def test_real_planning_prompt_pins_candidate_provenance_to_bound_model() -> None:
+    bound, transport, sync, _ = _transport("planning", {"candidate": "value"})
+    DeepSeekPlanningModel(
+        bound, transport, AllowingAuthorizer()
+    ).generate(planning_request(run_id="run_test"))
+
+    system = json.loads(sync.calls[0]["content"])["messages"][0]["content"]
+    assert (
+        f"planner_metadata.planning_model_id exactly to: {bound.settings.model_id}"
+        in system
+    )
+
+
 def test_phase11_input_admission_rejects_oversized_request_before_dispatch() -> None:
     bound = _bound(
         "planning",

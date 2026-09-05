@@ -82,6 +82,7 @@ def _messages(
     *,
     enable_web_tools: bool = False,
     enable_retrieval_tools: bool = False,
+    planning_model_id: str | None = None,
 ) -> tuple[dict[str, str], ...]:
     content = json.dumps(
         request.model_dump(mode="json"),
@@ -90,14 +91,22 @@ def _messages(
         sort_keys=True,
         separators=(",", ":"),
     )
+    system_content = deepseek_system_prompt(
+        role_id,
+        enable_web_tools=enable_web_tools,
+        enable_retrieval_tools=enable_retrieval_tools,
+    )
+    if planning_model_id is not None:
+        if role_id != "planning":
+            raise ValueError("planning model ID is valid only for planning")
+        system_content += (
+            "\nSet planner_metadata.planning_model_id exactly to: "
+            f"{planning_model_id}"
+        )
     return (
         {
             "role": "system",
-            "content": deepseek_system_prompt(
-                role_id,
-                enable_web_tools=enable_web_tools,
-                enable_retrieval_tools=enable_retrieval_tools,
-            ),
+            "content": system_content,
         },
         {"role": "user", "content": content},
     )
@@ -134,7 +143,13 @@ class DeepSeekPlanningModel:
         )
         failure: PlanningModelFailure | None = None
         try:
-            response = self._transport.complete(_messages("planning", request))
+            response = self._transport.complete(
+                _messages(
+                    "planning",
+                    request,
+                    planning_model_id=self._bound.settings.model_id,
+                )
+            )
             payload = json.loads(response.content)
             if not isinstance(payload, dict):
                 raise ValueError
