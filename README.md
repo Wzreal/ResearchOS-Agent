@@ -80,10 +80,15 @@ Phase 11 adds an operator-only REAL benchmark path. It requires an explicit
 versioned bundle, exact checked-out commit, clean tree, approved ref,
 `--acknowledge-real`, and explicit `--approved-cost-microunits`; USD 50 is a
 hard ceiling, not spending approval. The frozen 12-case benchmark infrastructure
-is available for future release-quality evaluation, but portfolio-v1 permits
-only an explicitly authorized, bounded REAL smoke; it never automatically
-continues to the other cases or to REAL ablations. Ordinary tests never invoke
-a provider.
+is available for future release-quality evaluation. Three bounded REAL planning
+smokes were performed: the final attempt dispatched DeepSeek Planning, received
+a response, and validated a three-task DAG, but execution stopped before Agent
+or tool dispatch because fixture-keyed execution-policy configuration did not
+cover planner-generated dynamic task IDs. That deterministic integration defect
+is fixed and regression-tested offline. No complete REAL benchmark case,
+Tavily search, evidence pipeline, claim extraction, verification, or 12-case
+benchmark is claimed. No further paid retries will be performed under the
+bounded portfolio budget; ordinary tests never invoke a provider.
 
 ## Repository layout
 

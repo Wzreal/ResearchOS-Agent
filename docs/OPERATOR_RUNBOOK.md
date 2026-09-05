@@ -12,13 +12,16 @@ researchos benchmark --phase11-bundle <bundle.json> \
   --acknowledge-real --case-id p11_citation_chain
 ```
 
-This is a limited portfolio-v1 smoke, not a full 12-case benchmark claim. Do
-not launch the remaining cases or either REAL ablation automatically. Record
-the first case's terminal state, provider/tool calls, input/output tokens,
-latency, measured or upper-bound cost, Evidence/citations, and verification
-outcome before seeking separate approval for any later REAL execution. Record
-unavailable cost/latency as unavailable. Use one review per output, then a
-blinded second review for the stratified 50% subset and adjudicate.
+This command remains the formal operator path, but the portfolio-v1 paid
+validation window is closed: three bounded Planning smokes were attempted and
+no further paid retry is authorized under the bounded portfolio budget. The
+final attempt validated a three-task planner DAG but stopped before Agent or
+tool dispatch due to a fixture-keyed execution-policy/dynamic-task-ID mismatch;
+the fix is regression-tested offline only. Do not represent this history as a
+complete REAL benchmark case, Tavily search, evidence pipeline, claim
+extraction, verification, or 12-case result. Record unavailable cost/latency
+as unavailable. Use one review per output, then a blinded second review for
+the stratified 50% subset and adjudicate.
 
 This runbook is for the implemented Phase 9 and Phase 10 profiles. It does not authorize
 manual edits to durable JSON, provider retries, or Run-state guesses.

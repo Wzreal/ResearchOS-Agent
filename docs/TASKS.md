@@ -4,9 +4,14 @@
 
 - DONE - Add fixed 12-case benchmark, config-only REAL bundle, admission
   checks, deterministic four-case ablations, and review contracts.
-- DONE - Reuse REAL composition and Phase 7 artifact evaluation; no paid run.
-- TODO - After separate authorization, run at most one bounded portfolio REAL
-  smoke; do not automatically run the remaining cases or REAL ablations.
+- DONE - Reuse REAL composition and Phase 7 artifact evaluation with offline
+  regression coverage.
+- DONE - Close Portfolio-v1 after three bounded REAL Planning smokes. The final
+  smoke validated a three-task DAG but stopped before Agent/tool dispatch on a
+  fixture-keyed execution-policy/dynamic-task-ID mismatch; the deterministic
+  fix is regression-tested offline. No complete REAL case, Tavily, evidence,
+  claim extraction, verification, or 12-case success is claimed; no further
+  paid retries are authorized under the bounded portfolio budget.
 
 Allowed states: **TODO**, **DOING**, **DONE**. A task becomes DONE only when its
 acceptance criteria and required tests pass. This file tracks implementation,

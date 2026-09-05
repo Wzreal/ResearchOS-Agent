@@ -1,14 +1,21 @@
 # Phase 9 Results, Costs, and Limitations
 
-## Phase 11 REAL benchmark result template
+## Phase 11 REAL validation limit
 
-No Phase 11 paid benchmark has been run. Portfolio-v1 may publish one bounded,
-explicitly authorized REAL smoke result without claiming that all 12 cases were
-run. When separately authorized, publish
-the dataset/bundle/profile/configuration pins, exact commit, source policy,
-Run IDs, metric provenance, and observed cost/latency. Keep UNKNOWN or
-unavailable values explicit. `structural_selfcheck_v1` is not Phase 11 quality
-evidence.
+Phase 11 implements a pinned 12-case REAL benchmark framework with complete
+offline regression coverage. Three bounded REAL Planning smoke attempts were
+performed. The final attempt dispatched DeepSeek Planning, received a response,
+and validated a three-task DAG, but execution stopped before Agent or tool
+dispatch because fixture-keyed execution-policy configuration did not cover
+planner-generated dynamic task IDs. That deterministic integration defect was
+subsequently fixed and regression-tested offline.
+
+No claim is made that a complete REAL benchmark case, Tavily search, evidence
+pipeline, claim extraction, verification, or the full 12-case benchmark
+succeeded in REAL mode. No further paid retries were performed because the
+portfolio budget is bounded. Do not infer measured token usage, latency, or
+cost where durable data is unavailable; `structural_selfcheck_v1` is not Phase
+11 quality evidence.
 
 ## Evidence vocabulary
 
