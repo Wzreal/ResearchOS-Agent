@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from researchos.application.dag_validator import DAGValidator
 from researchos.application.errors import RuntimePreconditionError
 from researchos.application.execution_policy_builder import ExecutionPolicyBuilder
+from researchos.application.perspective_planner import PerspectivePlanner
 from researchos.application.workflow_coordinator import WorkflowCoordinator
 from researchos.application.workflow_factory import WorkflowFactory
 from researchos.configuration.phase10_mock import build_phase10_mock_bundle_v1
@@ -19,10 +21,13 @@ from researchos.domain.contracts import (
 )
 from researchos.domain.planning import (
     PlanningError,
+    PlanningModelResponse,
     PlanningResult,
     PlanningStatus,
     ReplanContext,
 )
+from researchos.domain.runtime import RuntimeResourceAmount
+from researchos.domain.workflow import WorkflowBudgetAllocation
 
 
 class NeverCancelled:
@@ -88,6 +93,167 @@ def _profile_config() -> RunConfig:
             max_tool_calls=allocation.total.tool_calls,
         ),
     )
+
+
+def _run_config_for_profile(profile) -> RunConfig:
+    total = profile.budget.allocation.total
+    return RunConfig(
+        mode=OperatingMode.MOCK,
+        budget_limits=BudgetLimits(
+            max_duration_seconds=total.duration_milliseconds // 1_000,
+            max_tokens=total.tokens,
+            max_cost_microunits=total.cost_microunits,
+            max_tool_calls=total.tool_calls,
+        ),
+        allowed_capability_ids=("web_search",),
+    )
+
+
+def _phase11_portfolio_execution_profile():
+    """The frozen bundle's uniform execution policy, reconstructed offline."""
+
+    profile = build_phase10_mock_bundle_v1().workflow_profile
+    allocation = WorkflowBudgetAllocation(
+        total=RuntimeResourceAmount(
+            duration_milliseconds=1_080_000,
+            tokens=147_456,
+            cost_microunits=2_266_080,
+            tool_calls=15,
+        ),
+        planning=RuntimeResourceAmount(
+            duration_milliseconds=90_000,
+            tokens=12_288,
+            cost_microunits=163_840,
+            tool_calls=1,
+        ),
+        execution=RuntimeResourceAmount(
+            duration_milliseconds=540_000,
+            tokens=73_728,
+            cost_microunits=1_283_040,
+            tool_calls=9,
+        ),
+        claim_extraction=RuntimeResourceAmount(
+            duration_milliseconds=90_000,
+            tokens=12_288,
+            cost_microunits=163_840,
+            tool_calls=1,
+        ),
+        verification=RuntimeResourceAmount(
+            duration_milliseconds=360_000,
+            tokens=49_152,
+            cost_microunits=655_360,
+            tool_calls=4,
+        ),
+    )
+    template = profile.execution.task_policies[0].model_copy(
+        update={
+            "timeout_milliseconds": 180_000,
+            "reservation": RuntimeResourceAmount(
+                duration_milliseconds=180_000,
+                tokens=24_576,
+                cost_microunits=427_680,
+                tool_calls=3,
+            ),
+        }
+    )
+    return profile.model_copy(
+        update={
+            "profile_id": "phase11_portfolio_smoke",
+            "profile_version": "1",
+            "system_commit_sha": "a" * 40,
+            "system_version": "phase11-portfolio-smoke-v1",
+            "budget": profile.budget.model_copy(
+                update={
+                    "profile_id": "phase11_portfolio_smoke_budget",
+                    "profile_version": "1",
+                    "allocation": allocation,
+                }
+            ),
+            "execution": profile.execution.model_copy(
+                update={
+                    "task_policies": tuple(
+                        template.model_copy(update={"task_id": task_id})
+                        for task_id in ("task_a", "task_b", "task_c")
+                    )
+                }
+            ),
+        }
+    )
+
+
+class DynamicPlanningModel:
+    def __init__(self, task_ids: tuple[str, ...]) -> None:
+        self.task_ids = task_ids
+        self.requests = []
+
+    def generate(self, request):
+        self.requests.append(request)
+        return PlanningModelResponse(
+            planning_model_id="deepseek-v4-pro",
+            payload={
+                "schema_version": 1,
+                "run_id": request.run_id,
+                "plan_id": request.plan_id,
+                "perspectives": [
+                    {
+                        "perspective_id": "dynamic_perspective",
+                        "name": "dynamic",
+                        "title": "Dynamic",
+                        "goal": "Validate dynamic task binding",
+                        "rationale": "Offline regression",
+                        "priority": 50,
+                    }
+                ],
+                "tasks": [
+                    {
+                        "task_id": task_id,
+                        "perspective_id": "dynamic_perspective",
+                        "objective": f"Complete {task_id}",
+                        "dependencies": (
+                            []
+                            if index == 0
+                            else [{"task_id": self.task_ids[index - 1]}]
+                        ),
+                        "required_capability_ids": ["web_search"],
+                        "expected_outputs": [
+                            {
+                                "output_id": f"output_{index}",
+                                "description": f"Output {index}",
+                                "media_type": "application/json",
+                            }
+                        ],
+                        "estimate": {
+                            "duration_milliseconds": 1_000,
+                            "tokens": 100,
+                            "cost_microunits": 100,
+                            "tool_calls": 1,
+                        },
+                        "policy": {"priority": 50, "required": True},
+                    }
+                    for index, task_id in enumerate(self.task_ids)
+                ],
+                "planner_metadata": {
+                    "metadata_version": 1,
+                    "planning_model_id": "deepseek-v4-pro",
+                    "planner_id": "perspective_planner",
+                    "planner_version": "1",
+                },
+            },
+        )
+
+
+class RecordingHandoffs:
+    def __init__(self) -> None:
+        self.prepared_policy = None
+        self.prepared_result = None
+        self.checkpoint_calls = 0
+
+    def prepare(self, _state, result, *, execution_policy, **_kwargs) -> None:
+        self.prepared_result = result
+        self.prepared_policy = execution_policy
+
+    def create_or_validate_checkpoint(self, _state) -> None:
+        self.checkpoint_calls += 1
 
 
 def test_coordinator_returns_terminal_run_without_replaying_authorities(
@@ -222,9 +388,87 @@ def test_uniform_execution_templates_bind_dynamic_validated_dag_ids_and_build_po
 
 
 @pytest.mark.parametrize(
-    "task_ids", (("alpha", "beta"), ("alpha", "beta", "gamma", "delta"))
+    "task_ids",
+    (
+        ("dynamic_discovery", "dynamic_reconciliation", "dynamic_report"),
+        ("dynamic_discovery", "dynamic_reconciliation"),
+    ),
 )
-def test_dynamic_execution_template_rebinding_fails_closed_for_cardinality_mismatch(
+def test_phase11_dynamic_planning_rebinds_through_coordinator_handoff(
+    task_ids,
+    lifecycle,
+) -> None:
+    runs, _, trace, clock, run_input, _ = lifecycle
+    profile = _phase11_portfolio_execution_profile()
+    profile_hash = model_sha256(profile)
+    state = runs.transition(
+        runs.create(run_input, _run_config_for_profile(profile)).run_id,
+        RunStatus.PLANNING,
+    )
+    model = DynamicPlanningModel(task_ids)
+    planner = PerspectivePlanner(
+        model=model,
+        validator=DAGValidator(),
+        clock=clock,
+        trace_sink=trace,
+        id_factory=lambda prefix: f"{prefix}_dynamic",
+    )
+    handoffs = RecordingHandoffs()
+    coordinator = WorkflowCoordinator(
+        runs=runs,
+        planner=planner,
+        execution_policy_builder=ExecutionPolicyBuilder(),
+        handoffs=handoffs,
+        executor=None,
+        evidence_store=None,
+        claim_extractor=None,
+        verification=None,
+        evaluation_harness=None,
+        profile=profile,
+        clock=clock,
+        trace_sink=trace,
+        cancellation=NeverCancelled(),
+    )
+
+    coordinator._plan_or_recover(state)
+
+    assert len(model.requests) == 1
+    assert handoffs.prepared_result.validated_dag is not None
+    assert tuple(
+        task.task_id for task in handoffs.prepared_result.validated_dag.tasks
+    ) == task_ids
+    assert tuple(item.task_id for item in handoffs.prepared_policy.tasks) == task_ids
+    assert not {"task_a", "task_b", "task_c"}.intersection(
+        item.task_id for item in handoffs.prepared_policy.tasks
+    )
+    assert handoffs.checkpoint_calls == 1
+    assert model_sha256(profile) == profile_hash
+    assert profile.budget.allocation.execution.cost_microunits == 1_283_040
+
+    recovered = WorkflowCoordinator(
+        runs=runs,
+        planner=None,
+        execution_policy_builder=None,
+        handoffs=None,
+        executor=None,
+        evidence_store=None,
+        claim_extractor=None,
+        verification=None,
+        evaluation_harness=None,
+        profile=profile,
+        clock=clock,
+        trace_sink=trace,
+        cancellation=NeverCancelled(),
+    )
+    assert recovered._execution_config_for_dag(
+        handoffs.prepared_result.validated_dag
+    ) == coordinator._execution_config_for_dag(handoffs.prepared_result.validated_dag)
+
+
+@pytest.mark.parametrize(
+    "task_ids", (("alpha",), ("alpha", "beta"), ("alpha", "beta", "gamma"))
+)
+def test_uniform_execution_templates_bind_dynamic_dags_within_template_capacity(
     task_ids,
     lifecycle,
 ) -> None:
@@ -233,6 +477,55 @@ def test_dynamic_execution_template_rebinding_fails_closed_for_cardinality_misma
     dag = SimpleNamespace(
         tasks=tuple(SimpleNamespace(task_id=item) for item in task_ids)
     )
+
+    effective = coordinator._execution_config_for_dag(dag)
+    policy = ExecutionPolicyBuilder().build(
+        dag,
+        coordinator._profile.budget.allocation.execution,
+        effective,
+    )
+
+    assert tuple(item.task_id for item in effective.task_policies) == tuple(
+        sorted(task_ids)
+    )
+    assert tuple(item.task_id for item in policy.tasks) == tuple(sorted(task_ids))
+    assert coordinator._profile.execution.task_policies != effective.task_policies
+
+
+def test_dynamic_execution_template_rebinding_fails_closed_above_template_capacity(
+    lifecycle,
+) -> None:
+    runs, _, trace, clock, *_ = lifecycle
+    coordinator = _failure_coordinator(runs, trace, clock, planner=None)
+    dag = SimpleNamespace(
+        tasks=tuple(
+            SimpleNamespace(task_id=item)
+            for item in ("alpha", "beta", "gamma", "delta")
+        )
+    )
+
+    assert coordinator._execution_config_for_dag(dag) is coordinator._profile.execution
+    with pytest.raises(RuntimePreconditionError, match="cover DAG exactly"):
+        ExecutionPolicyBuilder().build(
+            dag,
+            coordinator._profile.budget.allocation.execution,
+            coordinator._profile.execution,
+        )
+
+
+def test_dynamic_execution_template_rebinding_fails_closed_without_templates(
+    lifecycle,
+) -> None:
+    runs, _, trace, clock, *_ = lifecycle
+    coordinator = _failure_coordinator(runs, trace, clock, planner=None)
+    coordinator._profile = coordinator._profile.model_copy(
+        update={
+            "execution": coordinator._profile.execution.model_copy(
+                update={"task_policies": ()}
+            )
+        }
+    )
+    dag = SimpleNamespace(tasks=(SimpleNamespace(task_id="alpha"),))
 
     assert coordinator._execution_config_for_dag(dag) is coordinator._profile.execution
     with pytest.raises(RuntimePreconditionError, match="cover DAG exactly"):

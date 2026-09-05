@@ -295,7 +295,7 @@ class WorkflowCoordinator:
         tasks = tuple(sorted(dag.tasks, key=lambda item: item.task_id))
         if {item.task_id for item in policies} == {item.task_id for item in tasks}:
             return config
-        if len(policies) != len(tasks):
+        if not policies or len(tasks) > len(policies):
             return config
         template = policies[0]
         if any(
