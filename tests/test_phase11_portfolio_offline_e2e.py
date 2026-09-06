@@ -7,9 +7,12 @@ from datetime import UTC, datetime
 
 from researchos.adapters.checkpoint_filesystem import FilesystemCheckpointStore
 from researchos.adapters.claim_filesystem import FilesystemClaimGraphStore
+from researchos.adapters.deepseek import _messages
 from researchos.adapters.evidence_filesystem import FilesystemEvidenceStore
 from researchos.adapters.filesystem import FilesystemRunStore, FilesystemTraceSink
+from researchos.adapters.openai_compatible import OpenAICompatibleChatTransport
 from researchos.application.capability_registry import CapabilityRegistry
+from researchos.application.real_composition import BoundRealModel
 from researchos.application.workflow_factory import WorkflowFactory
 from researchos.configuration.environment import (
     EnvironmentSecretSource,
@@ -55,12 +58,30 @@ from researchos.domain.workflow import WorkflowBudgetAllocation
 from researchos.interfaces.providers import ProviderAdmissionProfile
 
 _NOW = datetime(2026, 9, 6, tzinfo=UTC)
-_DYNAMIC_TASK_IDS = ("artemis_mission", "artemis_crew")
+_DYNAMIC_TASK_IDS = (
+    "task_official_mission_search",
+    "task_press_release_search",
+    "task_verification",
+)
+_EXPECTED_REQUEST_BYTES = {
+    "planning": 5_377,
+    "agent:task_official_mission_search:step1": 7_550,
+    "agent:task_official_mission_search:step2": 8_583,
+    "agent:task_press_release_search:step1": 7_575,
+    "agent:task_press_release_search:step2": 8_605,
+    "agent:task_verification:step1": 7_516,
+    "agent:task_verification:step2": 8_538,
+    "claim_extraction": 3_603,
+    "verification:synthesizer:round0": 9_466,
+    "verification:red:round1": 11_114,
+    "verification:blue:round1": 11_115,
+    "verification:judge:round1": 11_186,
+}
 
 
-def _settings():
+def _settings(max_input_tokens: int = 8_192):
     values = {
-        "RESEARCHOS_MAX_INPUT_TOKENS": "8192",
+        "RESEARCHOS_MAX_INPUT_TOKENS": str(max_input_tokens),
         "RESEARCHOS_MAX_OUTPUT_TOKENS": "4096",
         "RESEARCHOS_MAX_REQUEST_BYTES": "1048576",
         "RESEARCHOS_MAX_RESPONSE_BYTES": "1048576",
@@ -92,37 +113,92 @@ def _settings():
     return load_real_integration_settings(values, require_phase10_roles=True)
 
 
-def _portfolio_profile():
+class _RequestMeter:
+    """Exercise the exact production JSON request admission construction offline."""
+
+    def __init__(self) -> None:
+        self._settings = _settings(1_000_000)
+        self.measurements: list[tuple[str, str, int]] = []
+
+    def record(self, role_id: str, request) -> None:
+        settings = self._settings.model_for_role(role_id)
+        if hasattr(request, "run_id"):
+            run_id = request.run_id
+        elif hasattr(request.context, "run_id"):
+            run_id = request.context.run_id
+        else:
+            run_id = "run_offline_meter"
+        bound = BoundRealModel(
+            run_id=run_id,
+            run_config_hash="a" * 64,
+            composition_hash="b" * 64,
+            settings=settings,
+            bundle=settings.bundle(),
+            credential="offline-test-secret",
+        )
+        transport = OpenAICompatibleChatTransport(
+            bound, sync_client=object(), async_client=object()
+        )
+        messages = _messages(
+            role_id,
+            request,
+            enable_web_tools=role_id == "agent",
+            planning_model_id=(settings.model_id if role_id == "planning" else None),
+        )
+        encoded = transport._request_bytes(messages)
+        label = role_id
+        if role_id == "agent":
+            label = f"agent:{request.context.task_id}:step{request.agent_step}"
+        elif role_id == "verification":
+            label = f"verification:{request.role.value}:round{request.round_number}"
+        self.measurements.append((role_id, label, len(encoded)))
+
+
+def _portfolio_profile(settings):
     profile = build_phase10_mock_bundle_v1().workflow_profile
+    provider = settings.model_for_role("planning").policy.provider_call_reservation
+    assert all(
+        settings.model_for_role(role).policy.provider_call_reservation.total_tokens
+        == provider.total_tokens
+        and (
+            settings.model_for_role(role)
+            .policy.provider_call_reservation.cost_microunits
+        == provider.cost_microunits
+        )
+        for role in ("agent", "claim_extraction", "verification")
+    )
+    tavily_cost = (
+        settings.capability_for_id("web_search").provider_reservation.cost_microunits
+    )
     allocation = WorkflowBudgetAllocation(
         total=RuntimeResourceAmount(
             duration_milliseconds=1_080_000,
-            tokens=147_456,
-            cost_microunits=2_266_080,
+            tokens=provider.total_tokens * 12,
+            cost_microunits=provider.cost_microunits * 12 + tavily_cost * 3,
             tool_calls=15,
         ),
         planning=RuntimeResourceAmount(
             duration_milliseconds=90_000,
-            tokens=12_288,
-            cost_microunits=163_840,
+            tokens=provider.total_tokens,
+            cost_microunits=provider.cost_microunits,
             tool_calls=1,
         ),
         execution=RuntimeResourceAmount(
             duration_milliseconds=540_000,
-            tokens=73_728,
-            cost_microunits=1_283_040,
+            tokens=provider.total_tokens * 6,
+            cost_microunits=provider.cost_microunits * 6 + tavily_cost * 3,
             tool_calls=9,
         ),
         claim_extraction=RuntimeResourceAmount(
             duration_milliseconds=90_000,
-            tokens=12_288,
-            cost_microunits=163_840,
+            tokens=provider.total_tokens,
+            cost_microunits=provider.cost_microunits,
             tool_calls=1,
         ),
         verification=RuntimeResourceAmount(
             duration_milliseconds=360_000,
-            tokens=49_152,
-            cost_microunits=655_360,
+            tokens=provider.total_tokens * 4,
+            cost_microunits=provider.cost_microunits * 4,
             tool_calls=4,
         ),
     )
@@ -131,8 +207,8 @@ def _portfolio_profile():
             "timeout_milliseconds": 180_000,
             "reservation": RuntimeResourceAmount(
                 duration_milliseconds=180_000,
-                tokens=24_576,
-                cost_microunits=427_680,
+                tokens=provider.total_tokens * 2,
+                cost_microunits=provider.cost_microunits * 2 + tavily_cost,
                 tool_calls=3,
             ),
         }
@@ -163,7 +239,7 @@ def _portfolio_profile():
 
 
 def _bundle(settings):
-    profile = _portfolio_profile()
+    profile = _portfolio_profile(settings)
     return Phase11RealBenchmarkBundleV1(
         bundle_id="phase11_portfolio_smoke",
         bundle_version="1",
@@ -182,11 +258,13 @@ def _bundle(settings):
 
 
 class _FakePlanning:
-    def __init__(self) -> None:
+    def __init__(self, meter: _RequestMeter) -> None:
+        self._meter = meter
         self.requests = []
 
     def generate(self, request):
         self.requests.append(request)
+        self._meter.record("planning", request)
         return PlanningModelResponse(
             planning_model_id="deepseek-v4-pro",
             payload={
@@ -242,15 +320,17 @@ class _FakePlanning:
 
 
 class _FakeAgent:
-    def __init__(self, reservation) -> None:
+    def __init__(self, reservation, meter: _RequestMeter) -> None:
         self.provider_call_reservation = reservation
         self.provider_admission_profile = (
             ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
         )
+        self._meter = meter
         self.requests = []
 
     async def decide(self, request, _cancellation):
         self.requests.append(request)
+        self._meter.record("agent", request)
         if request.agent_step == 1:
             return AgentToolDecision(
                 tool_call=AgentToolCall(
@@ -314,29 +394,49 @@ class _FakeWebSearch:
         )
 
 
+class _FakeClaimExtraction:
+    def __init__(self, meter: _RequestMeter) -> None:
+        self._meter = meter
+        self._delegate = Phase10MockClaimExtractionModel()
+
+    @property
+    def model_bundle_hash(self) -> str:
+        return self._delegate.model_bundle_hash
+
+    @property
+    def invocation_count(self) -> int:
+        return self._delegate.invocation_count
+
+    def generate(self, request):
+        self._meter.record("claim_extraction", request)
+        return self._delegate.generate(request)
+
+
 class _FakeVerification:
-    def __init__(self) -> None:
+    def __init__(self, meter: _RequestMeter) -> None:
         self._delegate = Phase10MockVerificationModel()
+        self._meter = meter
         self.requests = []
 
     async def invoke(self, request, cancellation):
         self.requests.append(request)
+        self._meter.record("verification", request)
         response = await self._delegate.invoke(request, cancellation)
         return response.model_copy(update={"mode": "real"})
 
 
 class _FakeIntegrations:
-    def __init__(self, settings) -> None:
-        self.planning = _FakePlanning()
+    def __init__(self, settings, meter: _RequestMeter) -> None:
+        self.planning = _FakePlanning(meter)
         self.agent_adapter = _FakeAgent(
-            settings.model_for_role("agent").suboperation_reservation()
+            settings.model_for_role("agent").suboperation_reservation(), meter
         )
         capability = settings.capability_for_id("web_search")
         self.search = _FakeWebSearch(
             capability.descriptor(), capability.provider_reservation
         )
-        self.claim_extraction = Phase10MockClaimExtractionModel()
-        self.verification = _FakeVerification()
+        self.claim_extraction = _FakeClaimExtraction(meter)
+        self.verification = _FakeVerification(meter)
         self._registry = CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL}))
         self._registry.register(self.search)
 
@@ -357,10 +457,10 @@ class _FakeIntegrations:
         return self.verification
 
 
-def test_phase11_portfolio_real_composition_completes_offline_dynamic_two_task_case(
+def test_phase11_portfolio_real_composition_completes_offline_dynamic_three_task_case(
     tmp_path,
 ) -> None:
-    settings = _settings()
+    settings = _settings(12_288)
     bundle = _bundle(settings)
     factory = WorkflowFactory(tmp_path)
     coordinator = factory.build_real(
@@ -374,7 +474,8 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_two_task_c
         ),
     )
     runtime = coordinator._runtime_binder.__self__
-    fake = _FakeIntegrations(settings)
+    meter = _RequestMeter()
+    fake = _FakeIntegrations(settings, meter)
     runtime._integrations = fake
     case = next(
         item
@@ -398,17 +499,26 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_two_task_c
 
     assert state.status is RunStatus.COMPLETED
     assert len(fake.planning.requests) == 1
-    assert len(fake.agent_adapter.requests) == 4
-    assert len(fake.search.invocations) == 2
+    assert len(fake.agent_adapter.requests) == 6
+    assert len(fake.search.invocations) == 3
     assert fake.claim_extraction.invocation_count == 1
     assert len(fake.verification.requests) == 4
+    assert {role for role, _, _ in meter.measurements} == {
+        "planning",
+        "agent",
+        "claim_extraction",
+        "verification",
+    }
+    measurements = {label: size for _, label, size in meter.measurements}
+    assert measurements == _EXPECTED_REQUEST_BYTES
+    assert all(size <= 12_288 for size in measurements.values())
     trace = FilesystemTraceSink(tmp_path).read(state.run_id)
     assert TraceEventType.PLANNING_VALIDATED in {item.event_type for item in trace}
-    assert sum(item.event_type is TraceEventType.AGENT_COMPLETED for item in trace) == 2
+    assert sum(item.event_type is TraceEventType.AGENT_COMPLETED for item in trace) == 3
     tool_completed = sum(
         item.event_type is TraceEventType.TOOL_INVOCATION_SUCCEEDED for item in trace
     )
-    assert tool_completed == 2
+    assert tool_completed == 3
     assert FilesystemEvidenceStore(tmp_path).load(state.run_id).evidence
     graph = FilesystemClaimGraphStore(tmp_path).load(state.run_id)
     assert graph.claims and graph.claim_revisions
@@ -438,6 +548,27 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_two_task_c
         )
     ) == state
     persisted = FilesystemRunStore(tmp_path).load(state.run_id)
-    assert persisted.budget.usage.cost_microunits <= 2_266_080
-    assert persisted.budget.usage.tokens <= 147_456
+    assert persisted.budget.usage.cost_microunits <= 2_757_600
+    assert persisted.budget.usage.tokens <= 196_608
     assert persisted.budget.usage.tool_calls <= 15
+
+
+def test_phase11_portfolio_input_cap_candidates_cover_measured_requests() -> None:
+    first_failing_request = {
+        cap: next(
+            (
+                label
+                for label, size in _EXPECTED_REQUEST_BYTES.items()
+                if size > cap
+            ),
+            None,
+        )
+        for cap in (8_192, 12_288, 16_384, 24_576, 32_768)
+    }
+    assert first_failing_request == {
+        8_192: "agent:task_official_mission_search:step2",
+        12_288: None,
+        16_384: None,
+        24_576: None,
+        32_768: None,
+    }
