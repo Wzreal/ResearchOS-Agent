@@ -90,7 +90,18 @@ class RealIntegrationFactory:
             role_id="agent",
             composition_hash=bound.composition_hash,
         )
-        return DeepSeekAgent(bound, self._transport_factory(bound), self._authorizer)
+        web_search_max_results = None
+        if "web_search" in self._manager.configured_capability_ids():
+            capability = self._manager.bound_capability(run_id, "web_search")
+            policy = capability.settings.tavily_policy
+            assert policy is not None
+            web_search_max_results = policy.provider_request.max_results
+        return DeepSeekAgent(
+            bound,
+            self._transport_factory(bound),
+            self._authorizer,
+            web_search_max_results=web_search_max_results,
+        )
 
     def verification_model(self, run_id: str) -> DeepSeekVerificationModel:
         self._authorizer.authorize(run_id=run_id, role_id="verification")

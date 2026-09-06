@@ -1138,6 +1138,36 @@ def test_phase9b_agent_accepts_typed_model_tool_call() -> None:
     assert result.tool_call.capability_id == "web_search"
 
 
+def test_web_agent_rejects_search_limit_above_bound_capability_before_tool() -> None:
+    bound, transport, _, async_client = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "call_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 6},
+            },
+            "usage": None,
+            "usage_certainty": "unknown",
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            bound,
+            transport,
+            AllowingAuthorizer(),
+            web_search_max_results=5,
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.FAILED
+    assert result.error.code == "provider_response_invalid"
+    assert len(async_client.calls) == 1
+
+
 def test_phase9b_agent_rejects_non_web_model_tool_call() -> None:
     bound, transport, _, _ = _transport(
         "agent",

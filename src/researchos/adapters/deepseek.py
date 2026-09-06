@@ -32,6 +32,7 @@ from researchos.domain.agent import (
     AgentError,
     AgentFailedDecision,
     AgentRequest,
+    AgentToolDecision,
 )
 from researchos.domain.claim_extraction import (
     ClaimExtractionModelResult,
@@ -44,7 +45,7 @@ from researchos.domain.synthesis import (
     VerificationModelRequest,
     VerificationModelResponse,
 )
-from researchos.domain.tools import AdapterMode
+from researchos.domain.tools import AdapterMode, SearchRequest
 from researchos.interfaces.providers import (
     ProviderAdmissionProfile,
     ProviderDispatchAuthorizer,
@@ -265,6 +266,8 @@ class DeepSeekAgent:
         bound: BoundRealModel,
         transport: OpenAICompatibleChatTransport,
         authorizer: ProviderDispatchAuthorizer,
+        *,
+        web_search_max_results: int | None = None,
     ) -> None:
         _validate_binding(bound, "agent")
         self._bound = bound
@@ -276,6 +279,9 @@ class DeepSeekAgent:
         self._retrieval_tools = (
             bound.settings.response_contract_version == PHASE9C_AGENT_RESPONSE_CONTRACT
         )
+        if web_search_max_results is not None and not 1 <= web_search_max_results <= 20:
+            raise ValueError("REAL web search maximum results is invalid")
+        self._web_search_max_results = web_search_max_results
         self._descriptor = AgentDescriptor(
             agent_id="deepseek_agent",
             adapter_id=bound.settings.adapter_id,
@@ -373,7 +379,15 @@ class DeepSeekAgent:
             self._provider_diagnostics_by_request[request.request_id] = (
                 response.provider_diagnostics
             )
-            return TypeAdapter(contract).validate_python(payload)
+            decision = TypeAdapter(contract).validate_python(payload)
+            if (
+                self._web_search_max_results is not None
+                and isinstance(decision, AgentToolDecision)
+                and isinstance(decision.tool_call.input, SearchRequest)
+                and decision.tool_call.input.limit > self._web_search_max_results
+            ):
+                raise ValueError("web search limit exceeds bound capability policy")
+            return decision
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
