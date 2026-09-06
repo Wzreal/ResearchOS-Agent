@@ -110,6 +110,7 @@ def deepseek_system_prompt(
     enable_web_tools: bool = False,
     enable_retrieval_tools: bool = False,
     web_search_max_results: int | None = None,
+    require_explicit_web_search_capability: bool = False,
 ) -> str:
     prompt_key = (
         "agent_retrieval_tools"
@@ -132,7 +133,19 @@ def deepseek_system_prompt(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"{prompt}\nCanonical response schema:\n{canonical_schema}"
+    capability_instruction = ""
+    if require_explicit_web_search_capability:
+        if role_id != "planning":
+            raise ValueError("explicit web-search planning rule is planning-only")
+        capability_instruction = (
+            " For every task whose objective directs web search, declare "
+            "required_capability_ids exactly as [\"web_search\"]. A task that "
+            "does not invoke web search must declare its own exact capability list."
+        )
+    return (
+        f"{prompt}{capability_instruction}\nCanonical response schema:\n"
+        f"{canonical_schema}"
+    )
 
 
 def deepseek_prompt_content_hash(
@@ -141,6 +154,7 @@ def deepseek_prompt_content_hash(
     enable_web_tools: bool = False,
     enable_retrieval_tools: bool = False,
     web_search_max_results: int | None = None,
+    require_explicit_web_search_capability: bool = False,
 ) -> str:
     return sha256_text(
         deepseek_system_prompt(
@@ -148,6 +162,9 @@ def deepseek_prompt_content_hash(
             enable_web_tools=enable_web_tools,
             enable_retrieval_tools=enable_retrieval_tools,
             web_search_max_results=web_search_max_results,
+            require_explicit_web_search_capability=(
+                require_explicit_web_search_capability
+            ),
         )
     )
 

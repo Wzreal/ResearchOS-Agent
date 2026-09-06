@@ -184,6 +184,9 @@ def load_real_integration_settings(
                     web_search_max_results=(
                         web_search_max_results if role == "agent" else None
                     ),
+                    require_explicit_web_search_capability=(
+                        phase11_planning_total_timeout_enabled
+                    ),
                 ),
                 response_contract_version=deepseek_response_contract(
                     role,

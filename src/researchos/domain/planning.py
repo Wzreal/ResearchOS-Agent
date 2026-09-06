@@ -136,6 +136,9 @@ class PlanningPolicy(ContractModel):
     max_tasks: int = Field(gt=0)
     max_graph_depth: int = Field(gt=0)
     max_dependencies_per_task: int = Field(ge=0)
+    # Phase 11 REAL can opt into an explicit declaration rule without changing
+    # historical planning-policy semantics.
+    require_explicit_web_search_capability: bool = False
 
 
 class PlannerMetadata(ContractModel):
@@ -180,6 +183,7 @@ class ValidationIssueCode(StrEnum):
     DUPLICATE_CAPABILITY = "duplicate_capability"
     INVALID_CAPABILITY_ID = "invalid_capability_id"
     UNAUTHORIZED_CAPABILITY = "unauthorized_capability"
+    MISSING_REQUIRED_CAPABILITY = "missing_required_capability"
     TASK_LIMIT_EXCEEDED = "task_limit_exceeded"
     DEPENDENCY_LIMIT_EXCEEDED = "dependency_limit_exceeded"
     DEPTH_LIMIT_EXCEEDED = "depth_limit_exceeded"

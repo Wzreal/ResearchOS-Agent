@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import heapq
 import json
+import re
 from collections import Counter
 from datetime import datetime
 
@@ -190,6 +191,17 @@ class DAGValidator:
                     reverse_graph[task_id].add(dependency_id)
 
             capability_counts = Counter(task.required_capability_ids)
+            if (
+                request.policy.require_explicit_web_search_capability
+                and re.search(r"\bweb\s+search\b", task.objective, re.IGNORECASE)
+                and "web_search" not in task.required_capability_ids
+            ):
+                add(
+                    ValidationIssueCode.MISSING_REQUIRED_CAPABILITY,
+                    "web-search task must declare web_search capability",
+                    task_id=task_id,
+                    details={"capability_id": "web_search"},
+                )
             for capability_id in task.required_capability_ids:
                 if capability_counts[capability_id] > 1:
                     add(

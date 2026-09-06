@@ -279,6 +279,12 @@ class WorkflowFactory:
             raise ValueError(
                 "Phase 11 REAL planning requires an explicit total-call timeout"
             )
+        if not (
+            bundle.workflow_profile.planning_policy.require_explicit_web_search_capability
+        ):
+            raise ValueError(
+                "Phase 11 REAL planning requires explicit web-search capabilities"
+            )
         planning_reservation = planning_settings.suboperation_reservation()
         clock = SystemClock()
         trace = FilesystemTraceSink(self.root)

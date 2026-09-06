@@ -25,6 +25,7 @@ from researchos.configuration.phase11 import (
     phase11_real_run_config,
 )
 from researchos.configuration.phase11_benchmark import build_phase11_real_benchmark_v1
+from researchos.configuration.validation import deepseek_system_prompt
 from researchos.domain.contracts import (
     BudgetLimits,
     RunInput,
@@ -71,7 +72,14 @@ def _settings():
 
 
 def _bundle(settings):
-    profile = build_phase10_mock_bundle_v1().workflow_profile
+    source = build_phase10_mock_bundle_v1().workflow_profile
+    profile = source.model_copy(
+        update={
+            "planning_policy": source.planning_policy.model_copy(
+                update={"require_explicit_web_search_capability": True}
+            )
+        }
+    )
     return Phase11RealBenchmarkBundleV1(
         bundle_id="phase11_real_benchmark",
         bundle_version="1",
@@ -103,6 +111,16 @@ def test_build_real_constructs_without_network_or_credentials(tmp_path) -> None:
     )
     assert coordinator._planning_reservation.duration_milliseconds == 37
     assert not list(tmp_path.rglob("real_composition.json"))
+
+
+def test_phase11_planning_prompt_requires_explicit_web_search_capability() -> None:
+    phase11_prompt = deepseek_system_prompt(
+        "planning", require_explicit_web_search_capability=True
+    )
+    legacy_prompt = deepseek_system_prompt("planning")
+
+    assert 'required_capability_ids exactly as ["web_search"]' in phase11_prompt
+    assert "required_capability_ids exactly" not in legacy_prompt
 
 
 def test_phase11_input_admission_reserves_the_enforced_input_cap() -> None:

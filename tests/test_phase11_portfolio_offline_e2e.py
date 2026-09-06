@@ -59,20 +59,20 @@ from researchos.interfaces.providers import ProviderAdmissionProfile
 
 _NOW = datetime(2026, 9, 6, tzinfo=UTC)
 _DYNAMIC_TASK_IDS = (
-    "task_official_mission_search",
-    "task_press_release_search",
-    "task_verification",
-    "task_evidence_synthesis",
-    "task_final_report",
+    "task_1",
+    "task_2",
+    "task_3",
+    "task_4",
+    "task_5",
 )
 _EXPECTED_REQUEST_BYTES = {
     "planning": 5_378,
-    "agent:task_official_mission_search:step1": 7_550,
-    "agent:task_official_mission_search:step2": 8_583,
-    "agent:task_press_release_search:step1": 7_575,
-    "agent:task_press_release_search:step2": 8_605,
-    "agent:task_verification:step1": 7_516,
-    "agent:task_verification:step2": 8_538,
+    "agent:task_1:step1": 7_550,
+    "agent:task_1:step2": 8_583,
+    "agent:task_2:step1": 7_575,
+    "agent:task_2:step2": 8_605,
+    "agent:task_3:step1": 7_516,
+    "agent:task_3:step2": 8_538,
     "claim_extraction": 3_603,
     "verification:synthesizer:round0": 9_466,
     "verification:red:round1": 11_114,
@@ -223,6 +223,9 @@ def _portfolio_profile(settings):
             "profile_version": "1",
             "system_commit_sha": "a" * 40,
             "system_version": "phase11-portfolio-smoke-v1",
+            "planning_policy": profile.planning_policy.model_copy(
+                update={"require_explicit_web_search_capability": True}
+            ),
             "budget": profile.budget.model_copy(
                 update={
                     "profile_id": "phase11_portfolio_smoke_budget",
@@ -533,6 +536,10 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
     assert {
         policy.task_id for policy in checkpoint.execution_policy.tasks
     } == set(_DYNAMIC_TASK_IDS)
+    assert all(
+        task.required_capability_ids == ("web_search",)
+        for task in checkpoint.dag.tasks
+    )
     resumed = WorkflowFactory(tmp_path).build_real(
         bundle=bundle,
         settings=settings,
@@ -569,7 +576,7 @@ def test_phase11_portfolio_input_cap_candidates_cover_measured_requests() -> Non
         for cap in (8_192, 12_288, 16_384, 24_576, 32_768)
     }
     assert first_failing_request == {
-        8_192: "agent:task_official_mission_search:step2",
+        8_192: "agent:task_1:step2",
         12_288: None,
         16_384: None,
         24_576: None,

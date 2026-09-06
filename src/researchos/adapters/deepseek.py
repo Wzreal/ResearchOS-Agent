@@ -77,6 +77,9 @@ def _validate_binding(
         enable_web_tools=web_tools,
         enable_retrieval_tools=retrieval_tools,
         web_search_max_results=web_search_max_results,
+        require_explicit_web_search_capability=(
+            settings.phase11_planning_total_timeout_enabled
+        ),
     ):
         raise RunConfigurationError("DeepSeek prompt content hash differs")
     if settings.response_contract_version != deepseek_response_contract(
@@ -93,6 +96,7 @@ def _messages(
     enable_retrieval_tools: bool = False,
     web_search_max_results: int | None = None,
     planning_model_id: str | None = None,
+    require_explicit_web_search_capability: bool = False,
 ) -> tuple[dict[str, str], ...]:
     content = json.dumps(
         request.model_dump(mode="json"),
@@ -106,6 +110,9 @@ def _messages(
         enable_web_tools=enable_web_tools,
         enable_retrieval_tools=enable_retrieval_tools,
         web_search_max_results=web_search_max_results,
+        require_explicit_web_search_capability=(
+            require_explicit_web_search_capability
+        ),
     )
     if planning_model_id is not None:
         if role_id != "planning":
@@ -159,6 +166,9 @@ class DeepSeekPlanningModel:
                     "planning",
                     request,
                     planning_model_id=self._bound.settings.model_id,
+                    require_explicit_web_search_capability=(
+                        self._bound.settings.phase11_planning_total_timeout_enabled
+                    ),
                 ),
                 operation_id=request.request_id,
             )
