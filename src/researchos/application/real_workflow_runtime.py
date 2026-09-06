@@ -46,6 +46,9 @@ class RealWorkflowRuntime:
         self._claim_budget = claim_budget
         self._run_id: str | None = None
         self._registry: CapabilityRegistry | None = None
+        self._agent_provider_diagnostics_by_request: dict[
+            str, dict[str, object]
+        ] = {}
 
     def bind(self, state: RunState) -> None:
         if state.config.mode.value != "real":
@@ -76,9 +79,21 @@ class RealWorkflowRuntime:
         )
 
     async def agent(self, request: AgentRequest, cancellation: CancellationSignal):
-        return await self._integrations.agent(self._require_run_id()).decide(
-            request, cancellation
-        )
+        agent = self._integrations.agent(self._require_run_id())
+        decision = await agent.decide(request, cancellation)
+        diagnostics_for = getattr(agent, "provider_diagnostics_for", None)
+        if callable(diagnostics_for):
+            diagnostics = diagnostics_for(request.request_id)
+            if diagnostics is not None:
+                self._agent_provider_diagnostics_by_request[request.request_id] = (
+                    diagnostics
+                )
+        return decision
+
+    def agent_provider_diagnostics_for(
+        self, request_id: str
+    ) -> dict[str, object] | None:
+        return self._agent_provider_diagnostics_by_request.get(request_id)
 
     def agent_provider_call_reservation(self) -> ProviderSuboperationReservation:
         return self._integrations.agent(
@@ -141,6 +156,9 @@ class RealAgent:
 
     async def decide(self, request: AgentRequest, cancellation: CancellationSignal):
         return await self._runtime.agent(request, cancellation)
+
+    def provider_diagnostics_for(self, request_id: str) -> dict[str, object] | None:
+        return self._runtime.agent_provider_diagnostics_for(request_id)
 
 
 class RealClaimExtractionModel:

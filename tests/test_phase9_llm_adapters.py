@@ -4,6 +4,7 @@ import asyncio
 import json
 import traceback
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from phase9_fixtures import (
@@ -40,6 +41,7 @@ from researchos.application.real_composition import (
     BoundRealModel,
     RealCompositionManager,
 )
+from researchos.application.real_workflow_runtime import RealAgent, RealWorkflowRuntime
 from researchos.application.run_manager import RunManager
 from researchos.configuration.real_settings import default_tavily_capability
 from researchos.configuration.validation import (
@@ -415,6 +417,55 @@ def test_agent_length_failure_persists_safe_provider_diagnostics_in_trace() -> N
     assert diagnostics["output_tokens"] == 2
     serialized = event.model_dump_json()
     assert "never persisted" not in serialized
+
+
+def test_real_agent_wrapper_preserves_length_diagnostics_in_trace() -> None:
+    """The Phase 11 runtime wrapper must not drop safe adapter diagnostics."""
+    bound = _bound("agent")
+    body = _provider_envelope(
+        {"partial": "never persisted"},
+        model=bound.settings.model_id,
+        finish_reason="length",
+    )
+    adapter = DeepSeekAgent(
+        bound,
+        OpenAICompatibleChatTransport(
+            bound, sync_client=SyncClient(body), async_client=AsyncClient(body)
+        ),
+        AllowingAuthorizer(),
+    )
+    runtime = RealWorkflowRuntime(
+        integrations=SimpleNamespace(agent=lambda _run_id: adapter),
+        agent_descriptor=adapter.descriptor,
+        tool_descriptors=(),
+        claim_budget=RuntimeResourceAmount(),
+    )
+    runtime._run_id = "run_test"
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=RealAgent(runtime),
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_incomplete"
+    event = next(
+        item
+        for item in trace.read("run_test")
+        if item.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = event.attributes["provider_diagnostics_v1"]
+    assert diagnostics["provider_finish_reason"] == "length"
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["canonical_request_bytes"] > 0
+    assert "never persisted" not in event.model_dump_json()
 
 
 def test_length_finish_reason_does_not_parse_partial_json_as_success() -> None:

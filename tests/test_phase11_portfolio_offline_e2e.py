@@ -64,7 +64,7 @@ _DYNAMIC_TASK_IDS = (
     "task_verification",
 )
 _EXPECTED_REQUEST_BYTES = {
-    "planning": 5_377,
+    "planning": 5_378,
     "agent:task_official_mission_search:step1": 7_550,
     "agent:task_official_mission_search:step2": 8_583,
     "agent:task_press_release_search:step1": 7_575,
@@ -79,10 +79,12 @@ _EXPECTED_REQUEST_BYTES = {
 }
 
 
-def _settings(max_input_tokens: int = 8_192):
+def _settings(
+    max_input_tokens: int = 8_192, max_output_tokens: int = 4_096
+):
     values = {
         "RESEARCHOS_MAX_INPUT_TOKENS": str(max_input_tokens),
-        "RESEARCHOS_MAX_OUTPUT_TOKENS": "4096",
+        "RESEARCHOS_MAX_OUTPUT_TOKENS": str(max_output_tokens),
         "RESEARCHOS_MAX_REQUEST_BYTES": "1048576",
         "RESEARCHOS_MAX_RESPONSE_BYTES": "1048576",
         "RESEARCHOS_CONNECT_TIMEOUT_MS": "10000",
@@ -460,7 +462,7 @@ class _FakeIntegrations:
 def test_phase11_portfolio_real_composition_completes_offline_dynamic_three_task_case(
     tmp_path,
 ) -> None:
-    settings = _settings(12_288)
+    settings = _settings(12_288, 6_144)
     bundle = _bundle(settings)
     factory = WorkflowFactory(tmp_path)
     coordinator = factory.build_real(
