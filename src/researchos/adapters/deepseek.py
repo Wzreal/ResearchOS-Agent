@@ -148,7 +148,8 @@ class DeepSeekPlanningModel:
                     "planning",
                     request,
                     planning_model_id=self._bound.settings.model_id,
-                )
+                ),
+                operation_id=request.request_id,
             )
             payload = json.loads(response.content)
             if not isinstance(payload, dict):
@@ -156,6 +157,7 @@ class DeepSeekPlanningModel:
             return PlanningModelResponse(
                 planning_model_id=self._bound.settings.model_id,
                 payload=payload,
+                provider_diagnostics=response.provider_diagnostics,
             )
         except RealProviderFailure as exc:
             failure = PlanningModelFailure(
@@ -164,6 +166,7 @@ class DeepSeekPlanningModel:
                 retryable=exc.retryable,
                 usage=exc.usage,
                 usage_certainty=exc.usage_certainty,
+                provider_diagnostics=exc.provider_diagnostics,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             failure = PlanningModelFailure(
@@ -227,7 +230,9 @@ class DeepSeekClaimExtractionModel:
                 "claim extraction provider reservation exceeds workflow budget slice",
             )
         try:
-            response = self._transport.complete(_messages("claim_extraction", request))
+            response = self._transport.complete(
+                _messages("claim_extraction", request), operation_id=request.request_id
+            )
             payload = json.loads(response.content)
             if not isinstance(payload, dict):
                 raise ValueError
@@ -235,6 +240,7 @@ class DeepSeekClaimExtractionModel:
                 response=ClaimExtractionResponse.model_validate(payload),
                 usage=response.usage,
                 usage_certainty=response.usage_certainty,
+                provider_diagnostics=response.provider_diagnostics,
             )
         except RealProviderFailure as exc:
             raise PlanningModelFailure(
@@ -243,6 +249,7 @@ class DeepSeekClaimExtractionModel:
                 retryable=exc.retryable,
                 usage=exc.usage,
                 usage_certainty=exc.usage_certainty,
+                provider_diagnostics=exc.provider_diagnostics,
             ) from exc
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise PlanningModelFailure(
@@ -275,6 +282,7 @@ class DeepSeekAgent:
             mode=AdapterMode.REAL,
             operation_version=bound.settings.adapter_version,
         )
+        self._provider_diagnostics_by_request: dict[str, dict[str, object]] = {}
 
     async def aclose(self) -> None:
         await self._transport.aclose()
@@ -294,6 +302,9 @@ class DeepSeekAgent:
             if self._web_tools or self._retrieval_tools
             else ProviderAdmissionProfile.LEGACY_TASK_LIMIT_V1
         )
+
+    def provider_diagnostics_for(self, request_id: str) -> dict[str, object] | None:
+        return self._provider_diagnostics_by_request.get(request_id)
 
     async def decide(
         self, request: AgentRequest, cancellation: CancellationSignal
@@ -331,8 +342,12 @@ class DeepSeekAgent:
                 ),
                 cancellation=cancellation,
                 deadline=request.context.deadline,
+                operation_id=request.request_id,
             )
         except RealProviderFailure as exc:
+            self._provider_diagnostics_by_request[request.request_id] = (
+                exc.provider_diagnostics or {}
+            )
             return AgentFailedDecision(
                 error=AgentError(
                     code=exc.code,
@@ -355,6 +370,9 @@ class DeepSeekAgent:
                 if self._web_tools
                 else Phase9ARealAgentDecision
             )
+            self._provider_diagnostics_by_request[request.request_id] = (
+                response.provider_diagnostics
+            )
             return TypeAdapter(contract).validate_python(payload)
         except (
             UnicodeDecodeError,
@@ -362,6 +380,9 @@ class DeepSeekAgent:
             ValueError,
             ValidationError,
         ):
+            self._provider_diagnostics_by_request[request.request_id] = (
+                response.provider_diagnostics
+            )
             return AgentFailedDecision(
                 error=AgentError(
                     code="provider_response_invalid",
@@ -401,7 +422,9 @@ class DeepSeekVerificationModel:
             composition_hash=self._bound.composition_hash,
         )
         response = await self._transport.complete_async(
-            _messages("verification", request), cancellation=cancellation
+            _messages("verification", request),
+            cancellation=cancellation,
+            operation_id=request.verification_id,
         )
         return VerificationModelResponse(
             raw_bytes=response.content,
@@ -412,4 +435,5 @@ class DeepSeekVerificationModel:
             role=request.role,
             round_number=request.round_number,
             draft_revision_id=request.draft_revision_id,
+            provider_diagnostics=response.provider_diagnostics,
         )

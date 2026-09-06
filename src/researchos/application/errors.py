@@ -77,6 +77,7 @@ class RealProviderFailure(ResearchOSError):
         http_status: int | None = None,
         usage: RuntimeResourceAmount | None = None,
         usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN,
+        provider_diagnostics: dict[str, object] | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -89,6 +90,7 @@ class RealProviderFailure(ResearchOSError):
             raise ValueError("known usage certainty requires provider usage")
         self.usage = usage
         self.usage_certainty = usage_certainty
+        self.provider_diagnostics = provider_diagnostics
 
     @property
     def dispatched(self) -> bool:
@@ -150,6 +152,7 @@ class PlanningModelFailure(ResearchOSError):
         retryable: bool = False,
         usage: RuntimeResourceAmount | None = None,
         usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN,
+        provider_diagnostics: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -158,6 +161,7 @@ class PlanningModelFailure(ResearchOSError):
             raise ValueError("known usage certainty requires planning usage")
         self.usage = usage
         self.usage_certainty = usage_certainty
+        self.provider_diagnostics = provider_diagnostics
 
 
 class CheckpointNotFound(ResearchOSError):

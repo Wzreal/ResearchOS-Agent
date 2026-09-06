@@ -48,7 +48,7 @@ from researchos.configuration.validation import (
     deepseek_system_prompt,
 )
 from researchos.domain.agent import AgentContext, AgentDecisionKind, AgentRequest
-from researchos.domain.contracts import RunInput, RunStatus
+from researchos.domain.contracts import RunInput, RunStatus, TraceEventType
 from researchos.domain.planning import ExpectedOutput, ResearchTask
 from researchos.domain.runtime import (
     IdempotencyMode,
@@ -354,6 +354,67 @@ def test_non_stop_finish_reason_is_terminal_failure_with_known_usage(
     assert caught.value.usage.tokens == 5
     assert caught.value.usage_certainty.value == "upper_bound"
     assert len(client.calls) == 1
+    diagnostics = caught.value.provider_diagnostics
+    assert diagnostics == {
+        "schema_version": "provider_diagnostics_v1",
+        "role_id": "planning",
+        "operation_id": None,
+        "dispatch_classification": "response_received",
+        "http_response_received": True,
+        "provider_finish_reason": finish_reason,
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "max_input_tokens": bound.settings.policy.max_input_tokens,
+        "max_output_tokens": bound.settings.policy.max_output_tokens,
+        "canonical_request_bytes": diagnostics["canonical_request_bytes"],
+        "error_code": expected_code,
+        "retryable": retryable,
+        "duration_milliseconds": diagnostics["duration_milliseconds"],
+    }
+    assert b"partial" not in json.dumps(diagnostics).encode()
+
+
+def test_agent_length_failure_persists_safe_provider_diagnostics_in_trace() -> None:
+    bound = _bound("agent")
+    body = _provider_envelope(
+        {"partial": "never persisted"},
+        model=bound.settings.model_id,
+        finish_reason="length",
+    )
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=DeepSeekAgent(
+            bound,
+            OpenAICompatibleChatTransport(
+                bound, sync_client=SyncClient(body), async_client=AsyncClient(body)
+            ),
+            AllowingAuthorizer(),
+        ),
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+    assert result.error is not None
+    assert result.error.code == "provider_response_incomplete"
+    event = next(
+        item
+        for item in trace.read("run_test")
+        if item.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = event.attributes["provider_diagnostics_v1"]
+    assert diagnostics["provider_finish_reason"] == "length"
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["canonical_request_bytes"] > 0
+    assert diagnostics["max_output_tokens"] == bound.settings.policy.max_output_tokens
+    assert diagnostics["input_tokens"] == 3
+    assert diagnostics["output_tokens"] == 2
+    serialized = event.model_dump_json()
+    assert "never persisted" not in serialized
 
 
 def test_length_finish_reason_does_not_parse_partial_json_as_success() -> None:
@@ -1448,7 +1509,62 @@ def test_phase11_input_admission_allows_under_limit_request_to_dispatch() -> Non
         bound, sync_client=sync, async_client=AsyncClient(body)
     ).complete(({"role": "user", "content": "safe"},))
     assert response.diagnostic is ProviderDispatchDiagnostic.RESPONSE_RECEIVED
+
+
+@pytest.mark.parametrize(
+    "role", ("planning", "agent")
+)
+def test_openai_transport_persists_safe_response_diagnostics_for_every_role(
+    role: str,
+) -> None:
+    bound, transport, sync, _ = _transport(role, {"candidate": "value"})
+    response = transport.complete(
+        ({"role": "user", "content": "prompt-body-must-not-persist"},),
+        operation_id="operation_test",
+    )
+    diagnostics = response.provider_diagnostics
+    assert diagnostics["schema_version"] == "provider_diagnostics_v1"
+    assert diagnostics["role_id"] == role
+    assert diagnostics["operation_id"] == "operation_test"
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["provider_finish_reason"] == "stop"
+    assert diagnostics["input_tokens"] == 3
+    assert diagnostics["output_tokens"] == 2
+    assert diagnostics["total_tokens"] == 5
+    assert diagnostics["max_input_tokens"] == bound.settings.policy.max_input_tokens
+    assert diagnostics["max_output_tokens"] == bound.settings.policy.max_output_tokens
+    assert diagnostics["canonical_request_bytes"] > 0
+    assert "prompt-body-must-not-persist" not in json.dumps(diagnostics)
     assert len(sync.calls) == 1
+
+
+def test_missing_provider_usage_stays_unavailable_in_diagnostics() -> None:
+    bound = _bound("planning")
+    raw = json.dumps(
+        {
+            "model": bound.settings.model_id,
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": "RAW_COMPLETION_SENTINEL"},
+                }
+            ],
+        }
+    ).encode()
+    with pytest.raises(RealProviderFailure) as caught:
+        OpenAICompatibleChatTransport(
+            bound, sync_client=SyncClient(raw), async_client=AsyncClient(raw)
+        ).complete(({"role": "user", "content": "PROMPT_SENTINEL"},))
+    assert caught.value.code == "provider_response_invalid"
+    assert caught.value.usage is None
+    diagnostics = caught.value.provider_diagnostics
+    assert diagnostics is not None
+    assert diagnostics["input_tokens"] is None
+    assert diagnostics["output_tokens"] is None
+    assert diagnostics["total_tokens"] is None
+    assert "PROMPT_SENTINEL" not in json.dumps(diagnostics)
+    assert "RAW_COMPLETION_SENTINEL" not in json.dumps(diagnostics)
 
 
 def test_response_bound_streaming_rejects_without_retry() -> None:

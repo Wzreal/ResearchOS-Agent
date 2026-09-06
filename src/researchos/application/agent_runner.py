@@ -35,6 +35,7 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.real_composition import ProviderSuboperationReservation
 from researchos.domain.real_tools import (
     AuthorizedToolDispatchEnvelope,
@@ -275,7 +276,13 @@ class AgentRunner:
                     TraceEventType.AGENT_DECISION,
                     correlation_id=context.attempt_id,
                     causation_id=previous_event.event_id,
-                    attributes={"agent_step": step, "kind": decision.kind.value},
+                    attributes={
+                        "agent_step": step,
+                        "kind": decision.kind.value,
+                        "provider_diagnostics_v1": self._provider_diagnostics(
+                            request.request_id
+                        ),
+                    },
                 )
             except AgentTraceError:
                 return self._failure(
@@ -641,6 +648,21 @@ class AgentRunner:
                         "status": result.status.value,
                         "usage_certainty": result.usage_certainty.value,
                         "artifact_ids": [item.artifact_id for item in result.artifacts],
+                        "tool_diagnostics_v1": result.provider_diagnostics,
+                        "failure_code": (
+                            result.error.code if result.error is not None else None
+                        ),
+                        "retryable": (
+                            result.error.retryable
+                            if result.error is not None
+                            else False
+                        ),
+                        "result_count": (
+                            len(result.output.hits)
+                            if result.output is not None
+                            and hasattr(result.output, "hits")
+                            else None
+                        ),
                     },
                 )
             except AgentTraceError:
@@ -898,6 +920,12 @@ class AgentRunner:
                 correlation_id=context.attempt_id,
                 attributes={"agent_step": step, "tool_call_id": tool_call_id},
             )
+
+    def _provider_diagnostics(self, request_id: str) -> dict[str, object] | None:
+        method = getattr(self._agent, "provider_diagnostics_for", None)
+        if not callable(method):
+            return None
+        return validate_provider_diagnostics(method(request_id))
 
     @staticmethod
     def _tool_attributes(invocation, descriptor):

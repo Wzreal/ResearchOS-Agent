@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from researchos.domain.contracts import ContractModel, SafeId, _require_aware
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 
 PLANNING_SCHEMA_VERSION = 1
 VALIDATOR_VERSION = "dag-validator-v1"
@@ -343,6 +344,7 @@ class PlanningModelResponse(ContractModel):
     response_version: Literal[1] = 1
     planning_model_id: SafeId
     payload: dict[str, Any]
+    provider_diagnostics: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @field_validator("payload")
     @classmethod
@@ -352,6 +354,11 @@ class PlanningModelResponse(ContractModel):
         except (TypeError, ValueError) as exc:
             raise ValueError("planning payload must be finite JSON") from exc
         return value
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_must_be_json(cls, value: dict[str, Any] | None):
+        return validate_provider_diagnostics(value)
 
 
 class PlanningStatus(StrEnum):

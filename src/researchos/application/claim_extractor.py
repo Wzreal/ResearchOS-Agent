@@ -113,6 +113,7 @@ class ClaimExtractor:
                     usage=exc.usage,
                     usage_certainty=exc.usage_certainty,
                     failure_code="claim_extraction_model_failed",
+                    provider_diagnostics=exc.provider_diagnostics,
                 )
             except Exception:
                 return self._manager.transition(
@@ -127,6 +128,7 @@ class ClaimExtractor:
                 usage=settlement.usage,
                 usage_certainty=settlement.usage_certainty,
                 mutation_keys=self._mutation_keys(operation, response),
+                provider_diagnostics=settlement.provider_diagnostics,
             )
         if operation.status is ClaimExtractionOperationStatus.VALIDATED:
             self._replay(state, operation)

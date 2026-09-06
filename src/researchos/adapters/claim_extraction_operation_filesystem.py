@@ -71,7 +71,9 @@ class FilesystemClaimExtractionOperationStore:
                 raise CorruptClaimExtractionOperation(
                     "operation file is invalid"
                 ) from exc
-            operation = envelope.operation
+            operation = envelope.operation.model_copy(
+                update={"provider_diagnostics": envelope.provider_diagnostics}
+            )
             if operation.run_id != run_id or operation.extraction_id != extraction_id:
                 raise CorruptClaimExtractionOperation("operation identity differs")
             self._validate(operation)
@@ -101,7 +103,9 @@ class FilesystemClaimExtractionOperationStore:
 
     def _write(self, path: Path, operation: ClaimExtractionOperation) -> None:
         envelope = ClaimExtractionOperationEnvelope(
-            operation=operation, payload_sha256=model_sha256(operation)
+            operation=operation,
+            payload_sha256=model_sha256(operation),
+            provider_diagnostics=operation.provider_diagnostics,
         )
         try:
             atomic_replace_bytes(
@@ -114,6 +118,14 @@ class FilesystemClaimExtractionOperationStore:
 
     def _validate(self, operation: ClaimExtractionOperation) -> None:
         self._redactor.assert_safe_model(operation)
+        if operation.provider_diagnostics is not None:
+            self._redactor.assert_safe_model(
+                ClaimExtractionOperationEnvelope(
+                    operation=operation,
+                    payload_sha256=model_sha256(operation),
+                    provider_diagnostics=operation.provider_diagnostics,
+                )
+            )
         try:
             validated = ClaimExtractionOperation.model_validate(
                 operation.model_dump(mode="python")
@@ -122,7 +134,7 @@ class FilesystemClaimExtractionOperationStore:
             raise CorruptClaimExtractionOperation(
                 "operation contract is invalid"
             ) from exc
-        if validated != operation:
+        if validated != operation.model_copy(update={"provider_diagnostics": None}):
             raise CorruptClaimExtractionOperation("operation canonical form differs")
 
     def _path(self, run_id: str, extraction_id: str) -> Path:

@@ -37,6 +37,7 @@ from researchos.domain.planning import (
     ReplanResult,
     ValidationResult,
 )
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.runtime import RuntimeResourceAmount
 from researchos.domain.workflow import Phase10PlanningAdmission
 from researchos.interfaces.lifecycle import Clock, TraceSink
@@ -363,6 +364,9 @@ class PerspectivePlanner:
                     "plan_id": request.plan_id,
                     "error_code": error.code,
                     "retryable": error.retryable,
+                    "provider_diagnostics_v1": validate_provider_diagnostics(
+                        exc.provider_diagnostics
+                    ),
                 },
             )
             return PlanningResult(
@@ -384,6 +388,7 @@ class PerspectivePlanner:
             attributes={
                 "plan_id": request.plan_id,
                 "planning_model_id": response.planning_model_id,
+                "provider_diagnostics_v1": response.provider_diagnostics,
             },
         )
         try:

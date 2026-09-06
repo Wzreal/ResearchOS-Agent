@@ -30,7 +30,11 @@ from researchos.adapters.memory import InMemoryRunStore, InMemoryTraceSink
 from researchos.adapters.real_composition_memory import (
     InMemoryRealCompositionStore,
 )
-from researchos.adapters.tavily import HttpxTavilyTransport, TavilySearchTool
+from researchos.adapters.tavily import (
+    HttpxTavilyTransport,
+    TavilySearchTool,
+    TavilyTransportError,
+)
 from researchos.application.capability_registry import CapabilityRegistry
 from researchos.application.evidence_extractor import EvidenceExtractor
 from researchos.application.real_composition import (
@@ -264,6 +268,12 @@ def test_tavily_sends_only_documented_provider_fields_and_exact_endpoint() -> No
     encoded = result.model_dump_json()
     assert "raw-provider-secret" not in encoded
     assert "provider-answer-secret" not in encoded
+    diagnostics = result.provider_diagnostics
+    assert diagnostics is not None
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["http_dispatch_attempted"] is True
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["result_count"] == 1
 
 
 def test_tavily_denial_occurs_before_secret_or_http() -> None:
@@ -286,6 +296,86 @@ def test_tavily_denial_occurs_before_secret_or_http() -> None:
     assert result.usage is not None and result.usage.tool_calls == 1
     assert secrets.calls == 0
     assert transport.calls == []
+    diagnostics = result.provider_diagnostics
+    assert diagnostics is not None
+    assert diagnostics["dispatch_classification"] == "not_dispatched"
+    assert diagnostics["http_dispatch_attempted"] is False
+
+
+def test_tavily_failure_diagnostics_distinguish_transport_http_and_contract() -> None:
+    settings = default_tavily_capability()
+
+    class FailingTransport:
+        def __init__(self, value):
+            self.value = value
+
+        async def post_json(self, **_values):
+            if isinstance(self.value, Exception):
+                raise self.value
+            return self.value
+
+    cases = (
+        (
+            TavilyTransportError(dispatched=True, ambiguous=True),
+            "tavily_transport_failed",
+            "dispatched_outcome_unknown",
+            False,
+        ),
+        (
+            BoundedHttpResponse(status_code=503, headers=(), body=b""),
+            "tavily_http_503",
+            "response_received",
+            True,
+        ),
+        (
+            BoundedHttpResponse(
+                status_code=200,
+                headers=(("content-type", "application/json"),),
+                body=b"{}",
+            ),
+            "tavily_response_invalid",
+            "response_received",
+            True,
+        ),
+    )
+    for transport_value, code, dispatch, response_received in cases:
+        result = asyncio.run(
+            TavilySearchTool(
+                bound=_bound(settings),
+                authorizer=Authorizer(),
+                compositions=Secrets(),
+                transport=FailingTransport(transport_value),
+                clock=Clock(),
+            ).invoke_authorized(
+                _envelope(settings, SearchRequest(query="research")), Signal()
+            )
+        )
+        assert result.error is not None and result.error.code == code
+        diagnostics = result.provider_diagnostics
+        assert diagnostics is not None
+        assert diagnostics["dispatch_classification"] == dispatch
+        assert diagnostics["http_response_received"] is response_received
+        assert diagnostics["error_code"] == code
+
+
+def test_tool_diagnostics_reject_raw_provider_content() -> None:
+    with pytest.raises(ValueError):
+        ToolInvocationResult(
+            status=ToolInvocationStatus.FAILED,
+            error={"code": "tavily_transport_failed", "message": "failed"},
+            provider_diagnostics={
+                "schema_version": "tool_diagnostics_v1",
+                "adapter_id": "tavily_search",
+                "dispatch_classification": "not_dispatched",
+                "http_dispatch_attempted": False,
+                "http_response_received": False,
+                "retryable": False,
+                "duration_milliseconds": 0,
+                "result_count": None,
+                "provider_reservation": {},
+                "raw_provider_body": "TAVILY_RAW_SENTINEL",
+            },
+        )
 
 
 def test_tavily_credential_failure_consumes_one_logical_tool_call() -> None:

@@ -7,7 +7,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Event
 from typing import Any, Protocol
@@ -44,6 +44,7 @@ class ChatTransportResponse:
     diagnostic: ProviderDispatchDiagnostic = (
         ProviderDispatchDiagnostic.RESPONSE_RECEIVED
     )
+    provider_diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 def _load_httpx() -> Any:
@@ -128,9 +129,21 @@ class OpenAICompatibleChatTransport:
         if failure is not None:
             raise failure
 
-    def complete(self, messages: tuple[dict[str, str], ...]) -> ChatTransportResponse:
+    def complete(
+        self,
+        messages: tuple[dict[str, str], ...],
+        *,
+        operation_id: str | None = None,
+    ) -> ChatTransportResponse:
         request = self._request_bytes(messages)
         started = time.perf_counter_ns()
+        diagnostics = self._provider_diagnostics(
+            operation_id=operation_id,
+            request_bytes=len(request),
+            dispatch=ProviderDispatchDiagnostic.NOT_DISPATCHED,
+            response_received=False,
+            started_ns=started,
+        )
         total_timeout_ms = self._bound.settings.policy.provider_total_call_timeout_ms
         if self._bound.settings.phase11_planning_total_timeout_enabled:
             assert total_timeout_ms is not None
@@ -138,6 +151,7 @@ class OpenAICompatibleChatTransport:
                 request=request,
                 started_ns=started,
                 timeout_seconds=total_timeout_ms / 1_000,
+                diagnostics=diagnostics,
             )
         failure: RealProviderFailure | None = None
         try:
@@ -156,10 +170,16 @@ class OpenAICompatibleChatTransport:
                 "provider_transport_failed",
                 diagnostic=ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN,
                 retryable=True,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN,
+                    error_code="provider_transport_failed",
+                    retryable=True,
+                ),
             )
         if failure is not None:
             raise failure
-        return self._parse(raw, response.status_code, started)
+        return self._parse(raw, response.status_code, started, diagnostics)
 
     def _complete_sync_with_total_timeout(
         self,
@@ -167,6 +187,7 @@ class OpenAICompatibleChatTransport:
         request: bytes,
         started_ns: int,
         timeout_seconds: float,
+        diagnostics: dict[str, object],
     ) -> ChatTransportResponse:
         """Bound one synchronous provider operation, including response reading.
 
@@ -195,6 +216,15 @@ class OpenAICompatibleChatTransport:
                     if dispatched.is_set()
                     else ProviderDispatchDiagnostic.NOT_DISPATCHED
                 ),
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=(
+                        ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN
+                        if dispatched.is_set()
+                        else ProviderDispatchDiagnostic.NOT_DISPATCHED
+                    ),
+                    error_code="provider_total_call_timeout",
+                ),
             ) from exc
         except RealProviderFailure:
             raise
@@ -207,11 +237,21 @@ class OpenAICompatibleChatTransport:
                     else ProviderDispatchDiagnostic.NOT_DISPATCHED
                 ),
                 retryable=dispatched.is_set(),
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=(
+                        ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN
+                        if dispatched.is_set()
+                        else ProviderDispatchDiagnostic.NOT_DISPATCHED
+                    ),
+                    error_code="provider_transport_failed",
+                    retryable=dispatched.is_set(),
+                ),
             ) from exc
         finally:
             if future.done():
                 executor.shutdown(wait=False, cancel_futures=True)
-        return self._parse(raw, status_code, started_ns)
+        return self._parse(raw, status_code, started_ns, diagnostics)
 
     def _send_sync(
         self, request: bytes, dispatched: Event
@@ -232,6 +272,7 @@ class OpenAICompatibleChatTransport:
         *,
         cancellation: CancellationSignal,
         deadline: datetime | None = None,
+        operation_id: str | None = None,
     ) -> ChatTransportResponse:
         if cancellation.cancelled:
             raise RealProviderFailure(
@@ -245,6 +286,13 @@ class OpenAICompatibleChatTransport:
             )
         request = self._request_bytes(messages)
         started = time.perf_counter_ns()
+        diagnostics = self._provider_diagnostics(
+            operation_id=operation_id,
+            request_bytes=len(request),
+            dispatch=ProviderDispatchDiagnostic.NOT_DISPATCHED,
+            response_received=False,
+            started_ns=started,
+        )
         operation = asyncio.create_task(
             self._send_async(request), name="researchos-provider-operation"
         )
@@ -289,6 +337,11 @@ class OpenAICompatibleChatTransport:
                     diagnostic=(
                         ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN
                     ),
+                    provider_diagnostics=self._diagnostics_with(
+                        diagnostics,
+                        dispatch=ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN,
+                        error_code=code,
+                    ),
                 )
             cancelled.cancel()
             await asyncio.gather(cancelled, return_exceptions=True)
@@ -304,10 +357,16 @@ class OpenAICompatibleChatTransport:
                         ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN
                     ),
                     retryable=True,
+                    provider_diagnostics=self._diagnostics_with(
+                        diagnostics,
+                        dispatch=ProviderDispatchDiagnostic.DISPATCHED_OUTCOME_UNKNOWN,
+                        error_code="provider_transport_failed",
+                        retryable=True,
+                    ),
                 )
             if failure is not None:
                 raise failure
-            return self._parse(raw, status_code, started)
+            return self._parse(raw, status_code, started, diagnostics)
         except asyncio.CancelledError:
             await self._cancel_children(operation, cancelled)
             raise
@@ -425,7 +484,16 @@ class OpenAICompatibleChatTransport:
         raw: bytes,
         status_code: int,
         started_ns: int,
+        diagnostics: dict[str, object] | None = None,
     ) -> ChatTransportResponse:
+        if diagnostics is None:
+            diagnostics = self._provider_diagnostics(
+                operation_id=None,
+                request_bytes=0,
+                dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                response_received=True,
+                started_ns=started_ns,
+            )
         if not 200 <= status_code < 300:
             retryable = status_code == 429 or 500 <= status_code <= 599
             raise RealProviderFailure(
@@ -437,6 +505,17 @@ class OpenAICompatibleChatTransport:
                 diagnostic=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
                 retryable=retryable,
                 http_status=status_code,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                    response_received=True,
+                    error_code=(
+                        "provider_http_transient"
+                        if retryable
+                        else "provider_http_permanent"
+                    ),
+                    retryable=retryable,
+                ),
             )
         try:
             envelope = json.loads(raw)
@@ -486,6 +565,12 @@ class OpenAICompatibleChatTransport:
             raise RealProviderFailure(
                 "provider_response_invalid",
                 diagnostic=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                    response_received=True,
+                    error_code="provider_response_invalid",
+                ),
             ) from None
         policy = self._bound.settings.policy
         cost = (
@@ -521,6 +606,17 @@ class OpenAICompatibleChatTransport:
                 retryable=retryable,
                 usage=measured_usage,
                 usage_certainty=UsageCertainty.UPPER_BOUND,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                    response_received=True,
+                    finish_reason=finish_reason,
+                    usage=measured_usage,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    error_code=code,
+                    retryable=retryable,
+                ),
             )
         if (
             input_tokens > policy.max_input_tokens
@@ -532,6 +628,16 @@ class OpenAICompatibleChatTransport:
                 diagnostic=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
                 usage=measured_usage,
                 usage_certainty=UsageCertainty.UPPER_BOUND,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                    response_received=True,
+                    finish_reason=finish_reason,
+                    usage=measured_usage,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    error_code="provider_usage_limit_exceeded",
+                ),
             )
         if cost > policy.max_cost_microunits_per_call:
             raise RealProviderFailure(
@@ -539,6 +645,16 @@ class OpenAICompatibleChatTransport:
                 diagnostic=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
                 usage=measured_usage,
                 usage_certainty=UsageCertainty.UPPER_BOUND,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                    response_received=True,
+                    finish_reason=finish_reason,
+                    usage=measured_usage,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    error_code="provider_cost_limit_exceeded",
+                ),
             )
         try:
             content = choice["message"]["content"]
@@ -550,13 +666,89 @@ class OpenAICompatibleChatTransport:
                 diagnostic=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
                 usage=measured_usage,
                 usage_certainty=UsageCertainty.UPPER_BOUND,
+                provider_diagnostics=self._diagnostics_with(
+                    diagnostics,
+                    dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                    response_received=True,
+                    finish_reason=finish_reason,
+                    usage=measured_usage,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    error_code="provider_response_invalid",
+                ),
             ) from None
         return ChatTransportResponse(
             content=content.encode(),
             model_id=model_id,
             usage=measured_usage,
             usage_certainty=UsageCertainty.UPPER_BOUND,
+            provider_diagnostics=self._diagnostics_with(
+                diagnostics,
+                dispatch=ProviderDispatchDiagnostic.RESPONSE_RECEIVED,
+                response_received=True,
+                finish_reason=finish_reason,
+                usage=measured_usage,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
         )
+
+    def _provider_diagnostics(
+        self,
+        *,
+        operation_id: str | None,
+        request_bytes: int,
+        dispatch: ProviderDispatchDiagnostic,
+        response_received: bool,
+        started_ns: int,
+    ) -> dict[str, object]:
+        policy = self._bound.settings.policy
+        return {
+            "schema_version": "provider_diagnostics_v1",
+            "role_id": self._bound.settings.role_id,
+            "operation_id": operation_id,
+            "dispatch_classification": dispatch.value,
+            "http_response_received": response_received,
+            "provider_finish_reason": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "max_input_tokens": policy.max_input_tokens,
+            "max_output_tokens": policy.max_output_tokens,
+            "canonical_request_bytes": request_bytes,
+            "error_code": None,
+            "retryable": False,
+            "duration_milliseconds": max(
+                0, (time.perf_counter_ns() - started_ns) // 1_000_000
+            ),
+        }
+
+    @staticmethod
+    def _diagnostics_with(
+        diagnostics: dict[str, object],
+        *,
+        dispatch: ProviderDispatchDiagnostic,
+        response_received: bool | None = None,
+        finish_reason: str | None = None,
+        usage: RuntimeResourceAmount | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        error_code: str | None = None,
+        retryable: bool = False,
+    ) -> dict[str, object]:
+        value = dict(diagnostics)
+        value["dispatch_classification"] = dispatch.value
+        if response_received is not None:
+            value["http_response_received"] = response_received
+        value["provider_finish_reason"] = finish_reason
+        if usage is not None:
+            value["input_tokens"] = input_tokens
+            value["output_tokens"] = output_tokens
+            value["total_tokens"] = usage.tokens
+            value["duration_milliseconds"] = usage.duration_milliseconds
+        value["error_code"] = error_code
+        value["retryable"] = retryable
+        return value
 
     def _url(self) -> str:
         return f"{self._bound.settings.base_endpoint.rstrip('/')}/chat/completions"

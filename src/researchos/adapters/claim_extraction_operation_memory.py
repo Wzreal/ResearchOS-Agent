@@ -8,7 +8,11 @@ from researchos.application.errors import (
     ClaimExtractionOperationRevisionConflict,
     CorruptClaimExtractionOperation,
 )
-from researchos.domain.claim_extraction_operation import ClaimExtractionOperation
+from researchos.domain.claim_extraction_operation import (
+    ClaimExtractionOperation,
+    ClaimExtractionOperationEnvelope,
+)
+from researchos.domain.contracts import model_sha256
 from researchos.security.redaction import PersistenceRedactor
 
 
@@ -65,6 +69,14 @@ class InMemoryClaimExtractionOperationStore:
 
     def _validate(self, operation: ClaimExtractionOperation) -> None:
         self._redactor.assert_safe_model(operation)
+        if operation.provider_diagnostics is not None:
+            self._redactor.assert_safe_model(
+                ClaimExtractionOperationEnvelope(
+                    operation=operation,
+                    payload_sha256=model_sha256(operation),
+                    provider_diagnostics=operation.provider_diagnostics,
+                )
+            )
         try:
             validated = ClaimExtractionOperation.model_validate(
                 operation.model_dump(mode="python")
@@ -73,5 +85,5 @@ class InMemoryClaimExtractionOperationStore:
             raise CorruptClaimExtractionOperation(
                 "operation contract is invalid"
             ) from exc
-        if validated != operation:
+        if validated != operation.model_copy(update={"provider_diagnostics": None}):
             raise CorruptClaimExtractionOperation("operation canonical form differs")

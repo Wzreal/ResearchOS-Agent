@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -41,6 +42,7 @@ from researchos.domain.claim_extraction_operation import (
     ClaimExtractionOperationStatus,
 )
 from researchos.domain.claims import ClaimEvidenceRelation, ClaimGenerationContext
+from researchos.domain.contracts import canonical_json_bytes, model_sha256
 from researchos.domain.evidence import (
     EvidenceRecord,
     EvidenceRevision,
@@ -89,6 +91,83 @@ def test_filesystem_operation_round_trip_cas_and_duplicate(tmp_path) -> None:
     store.save(updated, expected_revision=0)
     with pytest.raises(ClaimExtractionOperationRevisionConflict):
         store.save(updated, expected_revision=0)
+
+
+def test_historical_claim_extraction_operation_hash_and_bytes_stay_v1_stable(
+    tmp_path,
+) -> None:
+    operation = _operation()
+    assert model_sha256(operation) == (
+        "a0e4395f83d6fc15121af614d3ba7ff1c5125616aa14332b26a4cd9739145c55"
+    )
+    historical = {
+        "envelope_version": 1,
+        "operation": operation.model_dump(mode="json"),
+        "payload_sha256": model_sha256(operation),
+    }
+    path = tmp_path / "run_1" / "claim_extraction_operations" / "extract_1.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        json.dumps(historical, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+    )
+    loaded = FilesystemClaimExtractionOperationStore(tmp_path).load(
+        "run_1", "extract_1"
+    )
+    assert loaded == operation
+    assert model_sha256(loaded) == historical["payload_sha256"]
+    assert canonical_json_bytes(loaded) == canonical_json_bytes(operation)
+
+
+def test_claim_extraction_diagnostics_are_durable_but_excluded_from_v1_payload_hash(
+    tmp_path,
+) -> None:
+    operation = ClaimExtractionOperation.model_validate(
+        {
+            **_operation().model_dump(mode="python"),
+            "provider_diagnostics": {
+                "schema_version": "provider_diagnostics_v1",
+                "role_id": "claim_extraction",
+                "operation_id": "extract_1",
+                "dispatch_classification": "response_received",
+                "http_response_received": True,
+                "provider_finish_reason": "stop",
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+                "max_input_tokens": 10,
+                "max_output_tokens": 10,
+                "canonical_request_bytes": 100,
+                "error_code": None,
+                "retryable": False,
+                "duration_milliseconds": 1,
+            },
+        }
+    )
+    assert model_sha256(operation) == model_sha256(_operation())
+    store = FilesystemClaimExtractionOperationStore(tmp_path)
+    store.create(operation)
+    persisted = next(tmp_path.rglob("*.json")).read_text(encoding="utf-8")
+    assert '"provider_diagnostics"' in persisted
+    assert store.load("run_1", "extract_1") == operation
+
+
+def test_claim_extraction_diagnostics_reject_secret_or_raw_content_before_journal(
+    tmp_path,
+) -> None:
+    with pytest.raises(ValueError):
+        ClaimExtractionOperation.model_validate(
+            {
+                **_operation().model_dump(mode="python"),
+                "provider_diagnostics": {
+                    "schema_version": "provider_diagnostics_v1",
+                    "role_id": "planning",
+                    "dispatch_classification": "response_received",
+                    "http_response_received": True,
+                    "raw_prompt": "PROMPT_SENTINEL",
+                },
+            }
+        )
+    assert not list(tmp_path.rglob("*.json"))
 
 
 def test_filesystem_operation_rejects_tampered_payload(tmp_path) -> None:
