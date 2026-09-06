@@ -184,6 +184,7 @@ class ValidationIssueCode(StrEnum):
     INVALID_CAPABILITY_ID = "invalid_capability_id"
     UNAUTHORIZED_CAPABILITY = "unauthorized_capability"
     MISSING_REQUIRED_CAPABILITY = "missing_required_capability"
+    BROWSER_TASK_REQUIRES_LOCAL_URL = "browser_task_requires_local_url"
     TASK_LIMIT_EXCEEDED = "task_limit_exceeded"
     DEPENDENCY_LIMIT_EXCEEDED = "dependency_limit_exceeded"
     DEPTH_LIMIT_EXCEEDED = "depth_limit_exceeded"

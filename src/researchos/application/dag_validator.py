@@ -7,6 +7,7 @@ import json
 import re
 from collections import Counter
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -201,6 +202,22 @@ class DAGValidator:
                     "web-search task must declare web_search capability",
                     task_id=task_id,
                     details={"capability_id": "web_search"},
+                )
+            if (
+                request.policy.require_explicit_web_search_capability
+                and "web_browser" in task.required_capability_ids
+                and "web_search" not in task.required_capability_ids
+                and not self._has_explicit_http_url(task.objective)
+            ):
+                add(
+                    ValidationIssueCode.BROWSER_TASK_REQUIRES_LOCAL_URL,
+                    "browser-only task must contain a concrete HTTP(S) source "
+                    "URL in its own objective; upstream task results are not "
+                    "delivered at runtime",
+                    task_id=task_id,
+                    details={
+                        "capability_ids": tuple(sorted(task.required_capability_ids))
+                    },
                 )
             for capability_id in task.required_capability_ids:
                 if capability_counts[capability_id] > 1:
@@ -452,6 +469,15 @@ class DAGValidator:
         except ValidationError:
             return False
         return True
+
+    @staticmethod
+    def _has_explicit_http_url(objective: str) -> bool:
+        """True when the objective text itself names an absolute HTTP(S) URL."""
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+", objective):
+            parsed = urlsplit(token.rstrip(".,;:!?)]}>\"'"))
+            if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
+                return True
+        return False
 
     @staticmethod
     def _issue_key(issue: ValidationIssue) -> tuple[str, str, str, str, str]:
