@@ -42,6 +42,10 @@ from researchos.domain.claim_extraction import (
     ClaimExtractionResponse,
 )
 from researchos.domain.planning import PlanningModelResponse, PlanningRequest
+from researchos.domain.provider_diagnostics import (
+    AgentResponseValidationDiagnosticsV1,
+    AgentResponseValidationErrorV1,
+)
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 from researchos.domain.synthesis import (
     VerificationModelRequest,
@@ -306,6 +310,92 @@ class _AgentResponseValidationError(ValueError):
         self.rule = rule
 
 
+_SAFE_AGENT_VALIDATION_LOC_SEGMENTS = frozenset(
+    {
+        "kind",
+        "tool_call",
+        "final",
+        "error",
+        "usage",
+        "usage_certainty",
+        "evidence_status",
+        "remaining_evidence_gap",
+        "tool_call_id",
+        "capability_id",
+        "input",
+        "input_type",
+        "query",
+        "url",
+        "limit",
+        "outputs",
+        "output_id",
+        "media_type",
+        "artifact_ids",
+        "value_hash",
+        "code",
+        "message",
+    }
+)
+_AGENT_VALIDATION_BRANCHES = frozenset({"tool_call", "final", "error"})
+
+
+def _safe_agent_response_validation(
+    exc: ValidationError | ValueError,
+) -> dict[str, object]:
+    """Return bounded diagnostics without retaining provider-supplied content."""
+
+    if not isinstance(exc, ValidationError):
+        return AgentResponseValidationDiagnosticsV1(
+            errors=(
+                AgentResponseValidationErrorV1(
+                    category="invalid", branch="decision", loc=("decision",)
+                ),
+            )
+        ).model_dump(mode="json")
+
+    diagnostics: list[AgentResponseValidationErrorV1] = []
+    errors = exc.errors(
+        include_context=False, include_input=False, include_url=False
+    )
+    for error in errors[:3]:
+        error_type = str(error["type"])
+        category = (
+            "missing"
+            if error_type == "missing"
+            else "enum"
+            if error_type in {"enum", "literal_error"}
+            else "extra"
+            if error_type == "extra_forbidden"
+            else "type"
+            if "type" in error_type or error_type.endswith("_parsing")
+            else "invalid"
+        )
+        parts = tuple(
+            str(part)
+            for part in error["loc"]
+            if isinstance(part, str) and part in _SAFE_AGENT_VALIDATION_LOC_SEGMENTS
+        )
+        branch = next(
+            (part for part in parts if part in _AGENT_VALIDATION_BRANCHES),
+            "decision",
+        )
+        diagnostics.append(
+            AgentResponseValidationErrorV1(
+                category=category,
+                branch="failed" if branch == "error" else branch,
+                loc=parts or ("decision",),
+            )
+        )
+    return AgentResponseValidationDiagnosticsV1(
+        errors=tuple(diagnostics)
+        or (
+            AgentResponseValidationErrorV1(
+                category="invalid", branch="decision", loc=("decision",)
+            ),
+        )
+    ).model_dump(mode="json")
+
+
 class DeepSeekAgent:
     def __init__(
         self,
@@ -474,13 +564,11 @@ class DeepSeekAgent:
                 usage=response.usage,
                 usage_certainty=response.usage_certainty,
             )
-        except (
-            ValueError,
-            ValidationError,
-        ):
+        except (ValueError, ValidationError) as exc:
             self._provider_diagnostics_by_request[request.request_id] = {
                 **response.provider_diagnostics,
                 "error_code": "agent_response_contract_invalid",
+                "agent_response_validation": _safe_agent_response_validation(exc),
             }
             return AgentFailedDecision(
                 error=AgentError(

@@ -45,6 +45,7 @@ from researchos.application.real_workflow_runtime import RealAgent, RealWorkflow
 from researchos.application.run_manager import RunManager
 from researchos.configuration.real_settings import default_tavily_capability
 from researchos.configuration.validation import (
+    PHASE11_AGENT_RESPONSE_CONTRACT,
     deepseek_prompt_content_hash,
     deepseek_response_contract,
     deepseek_system_prompt,
@@ -294,6 +295,27 @@ def _transport(
     return bound, OpenAICompatibleChatTransport(
         bound, sync_client=sync, async_client=async_client
     ), sync, async_client
+
+
+def _phase11_web_bound(bound: BoundRealModel) -> BoundRealModel:
+    settings = bound.settings.model_copy(
+        update={
+            "response_contract_version": PHASE11_AGENT_RESPONSE_CONTRACT,
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                "agent",
+                enable_web_tools=True,
+                require_evidence_gap_for_web_search=True,
+            ),
+        }
+    )
+    return BoundRealModel(
+        run_id=bound.run_id,
+        run_config_hash=bound.run_config_hash,
+        composition_hash=bound.composition_hash,
+        settings=settings,
+        bundle=settings.bundle(),
+        credential=bound.credential,
+    )
 
 
 def test_planning_adapter_maps_one_strict_json_response() -> None:
@@ -1061,6 +1083,153 @@ def test_malformed_agent_decision_preserves_upper_bound_provider_usage() -> None
     assert result.error.code == "provider_response_invalid"
     assert result.usage is not None and result.usage.tokens == 5
     assert result.usage_certainty.value == "upper_bound"
+
+
+def test_phase11_agent_accepts_valid_final_response() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {"output_id": "answer", "media_type": "text/plain"}
+                ]
+            },
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            _phase11_web_bound(bound), transport, AllowingAuthorizer()
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.FINAL
+
+
+def test_phase11_agent_accepts_valid_tool_call_response() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "search_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 1},
+            },
+            "evidence_status": "insufficient",
+            "remaining_evidence_gap": "authoritative_source_missing",
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            _phase11_web_bound(bound), transport, AllowingAuthorizer()
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.TOOL_CALL
+
+
+def test_phase11_agent_missing_final_persists_safe_validation_diagnostic() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {"kind": "final"},
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(_phase11_web_bound(bound), transport, AllowingAuthorizer())
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=agent,
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_invalid"
+    decision = next(
+        event
+        for event in trace.read("run_test")
+        if event.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = decision.attributes["provider_diagnostics_v1"]
+    assert diagnostics["error_code"] == "agent_response_contract_invalid"
+    assert diagnostics["agent_response_validation"] == {
+        "schema_version": "agent_response_validation_v1",
+        "errors": [
+            {"category": "missing", "branch": "final", "loc": ["final", "final"]}
+        ],
+    }
+
+
+def test_phase11_agent_invalid_enum_persists_safe_validation_diagnostic() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "search_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 1},
+            },
+            "evidence_status": "insufficient",
+            "remaining_evidence_gap": "not_a_valid_gap",
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(_phase11_web_bound(bound), transport, AllowingAuthorizer())
+
+    result = asyncio.run(agent.decide(_agent_request(), Signal()))
+
+    assert result.kind is AgentDecisionKind.FAILED
+    diagnostics = agent.provider_diagnostics_for("agent_request")
+    assert diagnostics is not None
+    assert diagnostics["agent_response_validation"] == {
+        "schema_version": "agent_response_validation_v1",
+        "errors": [
+            {
+                "category": "enum",
+                "branch": "tool_call",
+                "loc": ["tool_call", "remaining_evidence_gap"],
+            }
+        ],
+    }
+
+
+def test_phase11_agent_rejects_mixed_final_and_tool_call_response() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {"outputs": []},
+            "tool_call": {
+                "tool_call_id": "search_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 1},
+            },
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(_phase11_web_bound(bound), transport, AllowingAuthorizer())
+
+    result = asyncio.run(agent.decide(_agent_request(), Signal()))
+
+    assert result.kind is AgentDecisionKind.FAILED
+    diagnostics = agent.provider_diagnostics_for("agent_request")
+    assert diagnostics is not None
+    assert diagnostics["agent_response_validation"] == {
+        "schema_version": "agent_response_validation_v1",
+        "errors": [
+            {"category": "extra", "branch": "final", "loc": ["final", "tool_call"]}
+        ],
+    }
 
 
 def test_phase9b_agent_prompt_exposes_typed_tool_capabilities() -> None:

@@ -16,6 +16,25 @@ class ResourceDiagnosticsV1(ContractModel):
     tool_calls: int = Field(default=0, ge=0)
 
 
+class AgentResponseValidationErrorV1(ContractModel):
+    """A bounded, non-content-bearing Agent response validation failure."""
+
+    category: Literal["missing", "enum", "type", "extra", "invalid"]
+    branch: Literal["tool_call", "final", "failed", "decision"]
+    loc: tuple[SafeId, ...] = Field(min_length=1, max_length=4)
+
+
+class AgentResponseValidationDiagnosticsV1(ContractModel):
+    """Safe schema diagnostics; never contains model values or response text."""
+
+    schema_version: Literal["agent_response_validation_v1"] = (
+        "agent_response_validation_v1"
+    )
+    errors: tuple[AgentResponseValidationErrorV1, ...] = Field(
+        min_length=1, max_length=3
+    )
+
+
 class TavilyReservationDiagnosticsV1(ContractModel):
     schema_version: Literal[1]
     reservation_version: Annotated[str, StringConstraints(min_length=1, max_length=80)]
@@ -48,6 +67,7 @@ class ProviderDiagnosticsV1(ContractModel):
     max_output_tokens: int = Field(ge=1)
     canonical_request_bytes: int = Field(ge=0)
     error_code: SafeId | None = None
+    agent_response_validation: AgentResponseValidationDiagnosticsV1 | None = None
     retryable: bool
     duration_milliseconds: int = Field(ge=0)
 
@@ -73,7 +93,13 @@ def validate_provider_diagnostics(
 ) -> dict[str, object] | None:
     if value is None:
         return None
-    return ProviderDiagnosticsV1.model_validate(value).model_dump(mode="json")
+    validated = ProviderDiagnosticsV1.model_validate(value)
+    result = validated.model_dump(mode="json")
+    # Preserve Phase 1-10 diagnostic bytes unless this new, Phase 11-relevant
+    # safe validation detail is actually present.
+    if result["agent_response_validation"] is None:
+        del result["agent_response_validation"]
+    return result
 
 
 def validate_tool_diagnostics(
