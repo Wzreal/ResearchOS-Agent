@@ -134,6 +134,8 @@ def test_phase11_web_search_requires_bounded_evidence_gap_before_dispatch() -> N
     assert "return a final decision" in prompt
     assert "Before each web_search or web_browser" in prompt
     assert "do NOT request another web_search or web_browser" in prompt
+    assert "Search-provider metadata and snippets are discovery-only" in prompt
+    assert "do not return FINAL until a successful browser fetch" in prompt
     gapless = {
         "kind": "tool_call",
         "tool_call": {

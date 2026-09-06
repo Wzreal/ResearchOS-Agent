@@ -334,6 +334,9 @@ class WorkflowFactory:
             policy=AgentRunnerPolicy(
                 max_agent_steps=bundle.max_agent_steps,
                 max_tool_calls=bundle.max_agent_tool_calls,
+                require_source_evidence_before_final=(
+                    "web_browser" in bundle.capability_ids
+                ),
             ),
             clock=clock,
             sleeper=AsyncioSleeper(),

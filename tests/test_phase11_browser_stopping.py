@@ -50,7 +50,12 @@ from researchos.domain.tools import (
     AdapterMode,
     BrowserRequest,
     BrowserResult,
+    SearchContentKind,
+    SearchHitV2,
+    SearchRequest,
+    SearchResultV2,
     ToolDescriptor,
+    ToolError,
     ToolInvocationResult,
     ToolInvocationStatus,
     ToolSideEffect,
@@ -151,6 +156,73 @@ class BrowserFakeTool:
         )
 
 
+class SearchMetadataFakeTool:
+    """REAL-shaped search whose summaries are discovery-only metadata."""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+        self._reservation = _reservation(tool_calls=1)
+        self._descriptor = ToolDescriptor(
+            tool_id="search_tool",
+            capability_id="web_search",
+            adapter_id="real_search",
+            mode=AdapterMode.REAL,
+            operation_version="real-search-v1",
+            input_type="search",
+            output_type="search_result_v2",
+            side_effect=ToolSideEffect.EXTERNAL,
+            idempotency=IdempotencyMode.IDEMPOTENT,
+        )
+
+    @property
+    def descriptor(self):
+        return self._descriptor
+
+    @property
+    def provider_call_reservation(self):
+        return self._reservation
+
+    async def invoke_authorized(self, envelope, cancellation):
+        del cancellation
+        self.calls.append(envelope)
+        return ToolInvocationResult(
+            status=ToolInvocationStatus.SUCCEEDED,
+            output=SearchResultV2(
+                adapter_id=self._descriptor.adapter_id,
+                hits=(
+                    SearchHitV2(
+                        locator=_AUTHORITATIVE_URL,
+                        url=_AUTHORITATIVE_URL,
+                        title="Discovered source",
+                        snippet="Discovery metadata only.",
+                        content_kind=SearchContentKind.PROVIDER_SUMMARY_METADATA,
+                        retrieved_at=Clock.current,
+                        adapter_id=self._descriptor.adapter_id,
+                    ),
+                ),
+            ),
+            usage=ToolUsage(tool_calls=1),
+            usage_certainty=UsageCertainty.EXACT,
+        )
+
+
+class NotFoundBrowserFakeTool(BrowserFakeTool):
+    """A failed browser fetch must not become source evidence."""
+
+    async def invoke_authorized(self, envelope, cancellation):
+        del cancellation
+        self.calls.append(envelope)
+        return ToolInvocationResult(
+            status=ToolInvocationStatus.FAILED,
+            error=ToolError(
+                code="browser_http_not_found",
+                message="source returned HTTP 404",
+            ),
+            usage=ToolUsage(tool_calls=1),
+            usage_certainty=UsageCertainty.EXACT,
+        )
+
+
 class StoppingAgent:
     """Compliant agent that finalizes when an authoritative BrowserResult exists.
 
@@ -240,13 +312,63 @@ class StoppingAgent:
         raise AssertionError(f"unexpected mode {self.mode!r}")
 
 
-def _context(*, tool_calls: int) -> AgentContext:
+class SearchThenFinalAgent(StoppingAgent):
+    """Models final-21: metadata-only discovery followed by invalid FINAL."""
+
+    async def decide(self, request: AgentRequest, cancellation):
+        del cancellation
+        self.calls += 1
+        self.requests.append(request)
+        if not request.observations:
+            return Phase11RealWebAgentToolDecision(
+                tool_call=RealWebAgentToolCall(
+                    tool_call_id="discover_source",
+                    capability_id="web_search",
+                    input=SearchRequest(query="authoritative source"),
+                ),
+                evidence_status="insufficient",
+                remaining_evidence_gap=(
+                    EvidenceGapCategory.AUTHORITATIVE_SOURCE_MISSING
+                ),
+                usage=RuntimeResourceAmount(),
+                usage_certainty=UsageCertainty.EXACT,
+            )
+        return self._final_decision()
+
+
+class SearchThenBrowserThenFinalAgent(SearchThenFinalAgent):
+    """A compliant self-contained source-discovery trajectory."""
+
+    async def decide(self, request: AgentRequest, cancellation):
+        del cancellation
+        self.calls += 1
+        self.requests.append(request)
+        if not request.observations:
+            return Phase11RealWebAgentToolDecision(
+                tool_call=RealWebAgentToolCall(
+                    tool_call_id="discover_source",
+                    capability_id="web_search",
+                    input=SearchRequest(query="authoritative source"),
+                ),
+                evidence_status="insufficient",
+                remaining_evidence_gap=(
+                    EvidenceGapCategory.AUTHORITATIVE_SOURCE_MISSING
+                ),
+                usage=RuntimeResourceAmount(),
+                usage_certainty=UsageCertainty.EXACT,
+            )
+        if all(obs.capability_id != "web_browser" for obs in request.observations):
+            return self._browser_decision(_AUTHORITATIVE_URL)
+        return self._final_decision()
+
+
+def _context(*, tool_calls: int, capabilities=("web_browser",)) -> AgentContext:
     task = ResearchTask(
         task_id="task_browse_authority",
         perspective_id="perspective_one",
         objective="Determine the authoritative fact from the source document.",
         expected_outputs=(),
-        required_capability_ids=("web_browser",),
+        required_capability_ids=capabilities,
     )
     return AgentContext(
         run_id="run_phase11_stopping",
@@ -267,18 +389,23 @@ def _context(*, tool_calls: int) -> AgentContext:
             tool_calls=tool_calls,
         ),
         expected_outputs=(),
-        authorized_capability_ids=("web_browser",),
+        authorized_capability_ids=capabilities,
     )
 
 
-def _run(agent: StoppingAgent, tool: BrowserFakeTool, context: AgentContext):
+def _run(agent: StoppingAgent, tools: tuple[object, ...], context: AgentContext):
     registry = CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL}))
-    registry.register(tool)
+    for tool in tools:
+        registry.register(tool)
     return asyncio.run(
         AgentRunner(
             agent=agent,
             registry=registry,
-            policy=AgentRunnerPolicy(max_agent_steps=5, max_tool_calls=3),
+            policy=AgentRunnerPolicy(
+                max_agent_steps=5,
+                max_tool_calls=3,
+                require_source_evidence_before_final=True,
+            ),
             clock=Clock(),
             sleeper=Sleeper(),
             trace_sink=InMemoryTraceSink(),
@@ -291,7 +418,7 @@ def test_case_a_authoritative_browser_result_is_final_next_decision() -> None:
     agent = StoppingAgent("case_a")
     tool = BrowserFakeTool()
     context = _context(tool_calls=3)
-    result = _run(agent, tool, context)
+    result = _run(agent, (tool,), context)
     assert result.status.value == "succeeded"
     assert len(tool.calls) == 1
     assert agent.calls == 2
@@ -306,7 +433,7 @@ def test_case_b_insufficient_browser_allows_one_more_then_final() -> None:
     agent = StoppingAgent("case_b")
     tool = BrowserFakeTool()
     context = _context(tool_calls=3)
-    result = _run(agent, tool, context)
+    result = _run(agent, (tool,), context)
     assert result.status.value == "succeeded"
     assert len(tool.calls) == 2
     assert agent.calls == 3
@@ -320,10 +447,65 @@ def test_case_c_pathological_repeats_fail_closed_on_hard_tool_limit() -> None:
     agent = StoppingAgent("case_c")
     tool = BrowserFakeTool()
     context = _context(tool_calls=3)
-    result = _run(agent, tool, context)
+    result = _run(agent, (tool,), context)
     assert result.status.value == "failed"
     assert result.error is not None
     assert result.error.code == "agent_tool_call_limit_exceeded"
     assert len(tool.calls) == 3
     # The safety guard fired without raising max_agent_tool_calls or steps.
     assert agent.calls == 4
+
+
+def test_search_metadata_cannot_complete_browser_authorized_task() -> None:
+    """Final-21: discovery metadata alone cannot satisfy source evidence."""
+    agent = SearchThenFinalAgent("search_then_final")
+    search = SearchMetadataFakeTool()
+    context = _context(tool_calls=3, capabilities=("web_browser", "web_search"))
+    result = _run(agent, (search,), context)
+
+    assert result.status.value == "failed"
+    assert result.error is not None
+    assert result.error.code == "agent_source_evidence_required"
+    assert len(search.calls) == 1
+    assert len(result.observations) == 1
+    assert (
+        result.observations[0].result.output.hits[0].content_kind
+        is SearchContentKind.PROVIDER_SUMMARY_METADATA
+    )
+
+
+def test_search_then_browser_source_evidence_allows_final() -> None:
+    """A discovered URL fetched by browser permits FINAL with exactly two tools."""
+    agent = SearchThenBrowserThenFinalAgent("search_then_browser_then_final")
+    search = SearchMetadataFakeTool()
+    browser = BrowserFakeTool()
+    result = _run(
+        agent,
+        (search, browser),
+        _context(tool_calls=3, capabilities=("web_browser", "web_search")),
+    )
+
+    assert result.status.value == "succeeded"
+    assert len(search.calls) == 1
+    assert len(browser.calls) == 1
+    assert agent.calls == 3
+
+
+def test_search_then_browser_404_does_not_become_source_evidence() -> None:
+    """Discovery metadata plus a failed fetch remains ineligible for FINAL."""
+    agent = SearchThenBrowserThenFinalAgent("search_then_browser_then_final")
+    search = SearchMetadataFakeTool()
+    browser = NotFoundBrowserFakeTool()
+    result = _run(
+        agent,
+        (search, browser),
+        _context(tool_calls=3, capabilities=("web_browser", "web_search")),
+    )
+
+    assert result.status.value == "failed"
+    assert result.error is not None
+    assert result.error.code == "agent_source_evidence_required"
+    assert len(search.calls) == 1
+    assert len(browser.calls) == 1
+    assert len(result.observations) == 2
+    assert result.observations[-1].result.error.code == "browser_http_not_found"

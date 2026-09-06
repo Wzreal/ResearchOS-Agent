@@ -35,6 +35,7 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
+from researchos.domain.identity import sha256_text
 from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.real_composition import ProviderSuboperationReservation
 from researchos.domain.real_tools import (
@@ -48,6 +49,9 @@ from researchos.domain.runtime import (
 )
 from researchos.domain.tools import (
     AdapterMode,
+    BrowserResult,
+    SearchContentKind,
+    SearchResultV2,
     ToolInvocationRequest,
     ToolInvocationResult,
     ToolInvocationStatus,
@@ -78,6 +82,9 @@ class AgentRunnerPolicy(BaseModel):
     max_tool_calls: int = Field(ge=0)
     max_observation_bytes: int = Field(default=1_000_000, ge=1)
     trace_failure_retryable: bool = True
+    # Phase 11 REAL opt-in: search metadata can discover a source but cannot
+    # complete a task that explicitly requires a browser-fetched source body.
+    require_source_evidence_before_final: bool = False
 
 
 class _UsageAccumulator:
@@ -296,6 +303,16 @@ class AgentRunner:
                 )
 
             if decision.kind is AgentDecisionKind.FINAL:
+                if (
+                    self._policy.require_source_evidence_before_final
+                    and "web_browser" in context.authorized_capability_ids
+                    and not self._has_source_evidence(observations)
+                ):
+                    return self._failure(
+                        "agent_source_evidence_required",
+                        "browser-authorized task finalized without source evidence",
+                        usage,
+                    )
                 try:
                     self._emit(
                         context,
@@ -790,6 +807,25 @@ class AgentRunner:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
             raise
+
+    @staticmethod
+    def _has_source_evidence(observations: list[AgentObservation]) -> bool:
+        """Return whether current-task observations contain admissible source data."""
+
+        for observation in observations:
+            result = observation.result
+            if result.status is not ToolInvocationStatus.SUCCEEDED:
+                continue
+            output = result.output
+            if isinstance(output, BrowserResult):
+                if output.content_hash == sha256_text(output.content):
+                    return True
+            elif isinstance(output, SearchResultV2) and any(
+                hit.content_kind is SearchContentKind.SOURCE_EXCERPT
+                for hit in output.hits
+            ):
+                return True
+        return False
 
     def _precondition_failure(self, context, cancellation, usage):
         if cancellation.cancelled:

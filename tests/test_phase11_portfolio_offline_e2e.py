@@ -667,8 +667,8 @@ def test_phase11_search_metadata_without_browser_evidence_finalizes_partial(
     )
 
     assert state.status is RunStatus.PARTIAL
-    assert state.terminal_reason == "no_eligible_evidence"
-    assert len(fake.search.invocations) == 5
+    assert state.terminal_reason == "execution_partial"
+    assert len(fake.search.invocations) == 1
     assert not fake.browser.invocations
     assert fake.claim_extraction.invocation_count == 0
     assert not fake.verification.requests

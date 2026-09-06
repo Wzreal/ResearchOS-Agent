@@ -197,8 +197,11 @@ def deepseek_system_prompt(
             "the concrete bounded unresolved category that the next call will "
             "close; use web_browser only to fetch a specific discovered source, "
             "never to keep browsing once the authoritative source body is already "
-            "in hand, and a rejected or unavailable fetch is not by itself an "
-            "unresolved evidence gap."
+            "in hand. Search-provider metadata and snippets are discovery-only, "
+            "not source evidence: when the task authorizes web_browser, do not "
+            "return FINAL until a successful browser fetch or source excerpt is "
+            "in the observations. A rejected or unavailable fetch is not by "
+            "itself an unresolved evidence gap."
         )
     return (
         f"{prompt}{capability_instruction}{stopping_instruction}\n"
