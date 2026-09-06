@@ -174,13 +174,19 @@ def deepseek_system_prompt(
         if role_id != "agent" or not enable_web_tools:
             raise ValueError("evidence-gap rule is valid only for web-enabled Agent")
         stopping_instruction = (
-            " Before each web_search, assess the collected observations. If they "
-            "already support the requested core facts with an authoritative source, "
-            "and any requested cross-check has a relevant corroborating source, return "
-            "a final decision with citations instead of another tool call. A tool_call "
-            "is permitted only when evidence_status is 'insufficient' and "
-            "remaining_evidence_gap names the concrete unresolved category that the "
-            "search will close."
+            " Before each web_search or web_browser, assess the collected "
+            "observations. If the observations - including an already-fetched "
+            "authoritative source body or source excerpt - already support the "
+            "requested core facts with an authoritative source, and any requested "
+            "cross-check has a relevant corroborating source, return a final "
+            "decision with citations and do NOT request another web_search or "
+            "web_browser. A research tool_call is permitted only when "
+            "evidence_status is 'insufficient' and remaining_evidence_gap names "
+            "the concrete bounded unresolved category that the next call will "
+            "close; use web_browser only to fetch a specific discovered source, "
+            "never to keep browsing once the authoritative source body is already "
+            "in hand, and a rejected or unavailable fetch is not by itself an "
+            "unresolved evidence gap."
         )
     return (
         f"{prompt}{capability_instruction}{stopping_instruction}\n"

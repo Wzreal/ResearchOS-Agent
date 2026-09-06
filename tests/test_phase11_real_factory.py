@@ -132,6 +132,8 @@ def test_phase11_web_search_requires_bounded_evidence_gap_before_dispatch() -> N
     )
     assert "collected observations" in prompt
     assert "return a final decision" in prompt
+    assert "Before each web_search or web_browser" in prompt
+    assert "do NOT request another web_search or web_browser" in prompt
     gapless = {
         "kind": "tool_call",
         "tool_call": {
@@ -152,6 +154,41 @@ def test_phase11_web_search_requires_bounded_evidence_gap_before_dispatch() -> N
         }
     )
     assert admitted.evidence_status == "insufficient"
+
+
+def test_phase11_browser_stage_is_bound_by_the_evidence_gap_contract() -> None:
+    """The v4 contract governs web_browser like web_search (final-19 gap)."""
+    legacy_prompt = deepseek_system_prompt(
+        "agent",
+        enable_web_tools=True,
+        web_search_max_results=5,
+        require_evidence_gap_for_web_search=False,
+    )
+    assert "Before each web_search or web_browser" not in legacy_prompt
+    assert "do NOT request another web_search or web_browser" not in legacy_prompt
+    gapless_browser = {
+        "kind": "tool_call",
+        "tool_call": {
+            "tool_call_id": "browse_more",
+            "capability_id": "web_browser",
+            "input": {"input_type": "browser", "url": "https://example.com/"},
+        },
+        "usage": RuntimeResourceAmount().model_dump(mode="json"),
+        "usage_certainty": UsageCertainty.EXACT.value,
+    }
+    with pytest.raises(ValidationError):
+        TypeAdapter(Phase11RealAgentDecision).validate_python(gapless_browser)
+    admitted = TypeAdapter(Phase11RealAgentDecision).validate_python(
+        {
+            **gapless_browser,
+            "evidence_status": "insufficient",
+            "remaining_evidence_gap": EvidenceGapCategory.AUTHORITATIVE_SOURCE_MISSING,
+        }
+    )
+    assert admitted.tool_call.capability_id == "web_browser"
+    assert admitted.remaining_evidence_gap == (
+        EvidenceGapCategory.AUTHORITATIVE_SOURCE_MISSING
+    )
 
 
 def test_phase11_planning_prompt_requires_exact_web_capabilities() -> None:
