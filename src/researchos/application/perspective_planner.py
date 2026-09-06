@@ -396,7 +396,12 @@ class PerspectivePlanner:
             },
         )
         try:
-            candidate = CandidatePlan.model_validate(response.payload)
+            # ``plan_id`` is request-scoped host identity, not semantic model
+            # output. Bind it before admission so a provider cannot make the
+            # workflow depend on copying a generated identifier exactly.
+            candidate = CandidatePlan.model_validate(
+                {**response.payload, "plan_id": request.plan_id}
+            )
         except ValidationError as exc:
             validation = self._validator.malformed_result(
                 self._candidate_validation_errors(exc)
