@@ -1,6 +1,7 @@
 """Static DeepSeek prompt and canonical response-schema identity."""
 
 import json
+from copy import deepcopy
 from typing import Annotated
 
 from pydantic import Field, TypeAdapter
@@ -86,11 +87,29 @@ DEEPSEEK_RESPONSE_SCHEMAS = {
 }
 
 
+def _response_schema(
+    prompt_key: str, *, web_search_max_results: int | None
+) -> dict[str, object]:
+    schema = DEEPSEEK_RESPONSE_SCHEMAS[prompt_key]
+    if web_search_max_results is None:
+        return schema
+    if prompt_key not in {"agent_web_tools", "agent_retrieval_tools"}:
+        raise ValueError("web search maximum is valid only for Agent tool schemas")
+    if not 1 <= web_search_max_results <= 20:
+        raise ValueError("web search maximum is outside the Tavily policy range")
+    bounded = deepcopy(schema)
+    bounded["$defs"]["SearchRequest"]["properties"]["limit"]["maximum"] = (
+        web_search_max_results
+    )
+    return bounded
+
+
 def deepseek_system_prompt(
     role_id: str,
     *,
     enable_web_tools: bool = False,
     enable_retrieval_tools: bool = False,
+    web_search_max_results: int | None = None,
 ) -> str:
     prompt_key = (
         "agent_retrieval_tools"
@@ -101,7 +120,9 @@ def deepseek_system_prompt(
     )
     try:
         prompt = DEEPSEEK_PROMPTS[prompt_key]
-        schema = DEEPSEEK_RESPONSE_SCHEMAS[prompt_key]
+        schema = _response_schema(
+            prompt_key, web_search_max_results=web_search_max_results
+        )
     except KeyError as exc:
         raise ValueError("unsupported DeepSeek model role") from exc
     canonical_schema = json.dumps(
@@ -119,12 +140,14 @@ def deepseek_prompt_content_hash(
     *,
     enable_web_tools: bool = False,
     enable_retrieval_tools: bool = False,
+    web_search_max_results: int | None = None,
 ) -> str:
     return sha256_text(
         deepseek_system_prompt(
             role_id,
             enable_web_tools=enable_web_tools,
             enable_retrieval_tools=enable_retrieval_tools,
+            web_search_max_results=web_search_max_results,
         )
     )
 

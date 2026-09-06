@@ -86,6 +86,14 @@ def load_real_integration_settings(
     capability_settings = tuple(
         sorted(capability_settings, key=lambda item: item.capability_id)
     )
+    web_search_max_results = next(
+        (
+            item.tavily_policy.provider_request.max_results
+            for item in capability_settings
+            if item.capability_id == "web_search" and item.tavily_policy is not None
+        ),
+        None,
+    )
     enable_web_tools = any(
         item.capability_id in {"web_browser", "web_search"}
         for item in capability_settings
@@ -173,6 +181,9 @@ def load_real_integration_settings(
                     role,
                     enable_web_tools=(role == "agent" and enable_web_tools),
                     enable_retrieval_tools=(role == "agent" and enable_retrieval_tools),
+                    web_search_max_results=(
+                        web_search_max_results if role == "agent" else None
+                    ),
                 ),
                 response_contract_version=deepseek_response_contract(
                     role,

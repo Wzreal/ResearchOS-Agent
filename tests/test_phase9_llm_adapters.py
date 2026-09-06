@@ -1154,18 +1154,88 @@ def test_web_agent_rejects_search_limit_above_bound_capability_before_tool() -> 
         web_tools=True,
     )
 
+    dynamic_settings = bound.settings.model_copy(
+        update={
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                "agent", enable_web_tools=True, web_search_max_results=5
+            )
+        }
+    )
+    dynamic_bound = BoundRealModel(
+        run_id=bound.run_id,
+        run_config_hash=bound.run_config_hash,
+        composition_hash=bound.composition_hash,
+        settings=dynamic_settings,
+        bundle=dynamic_settings.bundle(),
+        credential=bound.credential,
+    )
+    agent = DeepSeekAgent(
+        dynamic_bound,
+        transport,
+        AllowingAuthorizer(),
+        web_search_max_results=5,
+    )
+    result = asyncio.run(agent.decide(_agent_request(), Signal()))
+
+    assert result.kind is AgentDecisionKind.FAILED
+    assert result.error.code == "provider_response_invalid"
+    diagnostics = agent.provider_diagnostics_for("agent_request")
+    assert diagnostics is not None
+    assert diagnostics["error_code"] == "web_search_limit_exceeded"
+    assert len(async_client.calls) == 1
+
+
+def test_web_agent_prompt_binds_tavily_limit_and_accepts_it() -> None:
+    prompt = deepseek_system_prompt(
+        "agent", enable_web_tools=True, web_search_max_results=5
+    )
+    prefix = prompt.split("\n", 1)[0] + "\nCanonical response schema:\n"
+    schema = json.loads(prompt.removeprefix(prefix))
+    assert schema["$defs"]["SearchRequest"]["properties"]["limit"] == {
+        "default": 5,
+        "maximum": 5,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer",
+    }
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "call_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 5},
+            },
+            "usage": None,
+            "usage_certainty": "unknown",
+        },
+        web_tools=True,
+    )
+    settings = bound.settings.model_copy(
+        update={
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                "agent", enable_web_tools=True, web_search_max_results=5
+            )
+        }
+    )
+    dynamic_bound = BoundRealModel(
+        run_id=bound.run_id,
+        run_config_hash=bound.run_config_hash,
+        composition_hash=bound.composition_hash,
+        settings=settings,
+        bundle=settings.bundle(),
+        credential=bound.credential,
+    )
     result = asyncio.run(
         DeepSeekAgent(
-            bound,
+            dynamic_bound,
             transport,
             AllowingAuthorizer(),
             web_search_max_results=5,
         ).decide(_agent_request(), Signal())
     )
-
-    assert result.kind is AgentDecisionKind.FAILED
-    assert result.error.code == "provider_response_invalid"
-    assert len(async_client.calls) == 1
+    assert result.kind is AgentDecisionKind.TOOL_CALL
 
 
 def test_phase9b_agent_rejects_non_web_model_tool_call() -> None:
