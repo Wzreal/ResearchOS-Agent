@@ -295,7 +295,11 @@ class WorkflowCoordinator:
         tasks = tuple(sorted(dag.tasks, key=lambda item: item.task_id))
         if {item.task_id for item in policies} == {item.task_id for item in tasks}:
             return config
-        if not policies or len(tasks) > len(policies):
+        # The planner is authoritative for accepted DAG cardinality.  Uniform
+        # configuration entries are templates, not a second cardinality limit.
+        # Materialization remains bounded by the immutable planning policy and
+        # preserves ExecutionPolicyBuilder's exact task-ID coverage check.
+        if not policies or len(tasks) > self._profile.planning_policy.max_tasks:
             return config
         template = policies[0]
         if any(

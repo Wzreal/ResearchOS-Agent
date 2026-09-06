@@ -392,6 +392,13 @@ def test_uniform_execution_templates_bind_dynamic_validated_dag_ids_and_build_po
     (
         ("dynamic_discovery", "dynamic_reconciliation", "dynamic_report"),
         ("dynamic_discovery", "dynamic_reconciliation"),
+        (
+            "dynamic_discovery",
+            "dynamic_reconciliation",
+            "dynamic_verification",
+            "dynamic_synthesis",
+            "dynamic_report",
+        ),
     ),
 )
 def test_phase11_dynamic_planning_rebinds_through_coordinator_handoff(
@@ -434,10 +441,14 @@ def test_phase11_dynamic_planning_rebinds_through_coordinator_handoff(
 
     assert len(model.requests) == 1
     assert handoffs.prepared_result.validated_dag is not None
+    expected_task_ids = tuple(sorted(task_ids))
     assert tuple(
         task.task_id for task in handoffs.prepared_result.validated_dag.tasks
-    ) == task_ids
-    assert tuple(item.task_id for item in handoffs.prepared_policy.tasks) == task_ids
+    ) == expected_task_ids
+    assert (
+        tuple(item.task_id for item in handoffs.prepared_policy.tasks)
+        == expected_task_ids
+    )
     assert not {"task_a", "task_b", "task_c"}.intersection(
         item.task_id for item in handoffs.prepared_policy.tasks
     )
@@ -466,9 +477,15 @@ def test_phase11_dynamic_planning_rebinds_through_coordinator_handoff(
 
 
 @pytest.mark.parametrize(
-    "task_ids", (("alpha",), ("alpha", "beta"), ("alpha", "beta", "gamma"))
+    "task_ids",
+    (
+        ("alpha",),
+        ("alpha", "beta"),
+        ("alpha", "beta", "gamma"),
+        ("alpha", "beta", "gamma", "delta", "epsilon"),
+    ),
 )
-def test_uniform_execution_templates_bind_dynamic_dags_within_template_capacity(
+def test_uniform_execution_templates_bind_dynamic_dags_within_planning_capacity(
     task_ids,
     lifecycle,
 ) -> None:
@@ -490,9 +507,15 @@ def test_uniform_execution_templates_bind_dynamic_dags_within_template_capacity(
     )
     assert tuple(item.task_id for item in policy.tasks) == tuple(sorted(task_ids))
     assert coordinator._profile.execution.task_policies != effective.task_policies
+    template = coordinator._profile.execution.task_policies[0]
+    assert all(
+        item.model_dump(mode="python", exclude={"task_id"})
+        == template.model_dump(mode="python", exclude={"task_id"})
+        for item in effective.task_policies
+    )
 
 
-def test_dynamic_execution_template_rebinding_fails_closed_above_template_capacity(
+def test_dynamic_execution_template_rebinding_fails_closed_above_planning_capacity(
     lifecycle,
 ) -> None:
     runs, _, trace, clock, *_ = lifecycle
@@ -500,7 +523,19 @@ def test_dynamic_execution_template_rebinding_fails_closed_above_template_capaci
     dag = SimpleNamespace(
         tasks=tuple(
             SimpleNamespace(task_id=item)
-            for item in ("alpha", "beta", "gamma", "delta")
+            for item in (
+                "alpha",
+                "beta",
+                "gamma",
+                "delta",
+                "epsilon",
+                "zeta",
+                "eta",
+                "theta",
+                "iota",
+                "kappa",
+                "lambda",
+            )
         )
     )
 

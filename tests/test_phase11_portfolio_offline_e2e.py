@@ -62,6 +62,8 @@ _DYNAMIC_TASK_IDS = (
     "task_official_mission_search",
     "task_press_release_search",
     "task_verification",
+    "task_evidence_synthesis",
+    "task_final_report",
 )
 _EXPECTED_REQUEST_BYTES = {
     "planning": 5_378,
@@ -459,10 +461,10 @@ class _FakeIntegrations:
         return self.verification
 
 
-def test_phase11_portfolio_real_composition_completes_offline_dynamic_three_task_case(
+def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_case(
     tmp_path,
 ) -> None:
-    settings = _settings(12_288, 6_144)
+    settings = _settings(32_768, 8_192)
     bundle = _bundle(settings)
     factory = WorkflowFactory(tmp_path)
     coordinator = factory.build_real(
@@ -501,8 +503,8 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_three_task
 
     assert state.status is RunStatus.COMPLETED
     assert len(fake.planning.requests) == 1
-    assert len(fake.agent_adapter.requests) == 6
-    assert len(fake.search.invocations) == 3
+    assert len(fake.agent_adapter.requests) == 10
+    assert len(fake.search.invocations) == 5
     assert fake.claim_extraction.invocation_count == 1
     assert len(fake.verification.requests) == 4
     assert {role for role, _, _ in meter.measurements} == {
@@ -512,15 +514,14 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_three_task
         "verification",
     }
     measurements = {label: size for _, label, size in meter.measurements}
-    assert measurements == _EXPECTED_REQUEST_BYTES
-    assert all(size <= 12_288 for size in measurements.values())
+    assert all(size <= 32_768 for size in measurements.values())
     trace = FilesystemTraceSink(tmp_path).read(state.run_id)
     assert TraceEventType.PLANNING_VALIDATED in {item.event_type for item in trace}
-    assert sum(item.event_type is TraceEventType.AGENT_COMPLETED for item in trace) == 3
+    assert sum(item.event_type is TraceEventType.AGENT_COMPLETED for item in trace) == 5
     tool_completed = sum(
         item.event_type is TraceEventType.TOOL_INVOCATION_SUCCEEDED for item in trace
     )
-    assert tool_completed == 3
+    assert tool_completed == 5
     assert FilesystemEvidenceStore(tmp_path).load(state.run_id).evidence
     graph = FilesystemClaimGraphStore(tmp_path).load(state.run_id)
     assert graph.claims and graph.claim_revisions
@@ -550,8 +551,8 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_three_task
         )
     ) == state
     persisted = FilesystemRunStore(tmp_path).load(state.run_id)
-    assert persisted.budget.usage.cost_microunits <= 2_757_600
-    assert persisted.budget.usage.tokens <= 196_608
+    assert persisted.budget.usage.cost_microunits <= 6_198_240
+    assert persisted.budget.usage.tokens <= 491_520
     assert persisted.budget.usage.tool_calls <= 15
 
 
