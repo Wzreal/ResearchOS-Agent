@@ -99,6 +99,7 @@ class PerspectivePlanner:
         trace_sink: TraceSink,
         id_factory: IdFactory | None = None,
         redactor: PersistenceRedactor | None = None,
+        per_task_tool_call_limit: int | None = None,
     ) -> None:
         self._model = model
         self._validator = validator
@@ -106,6 +107,9 @@ class PerspectivePlanner:
         self._trace = trace_sink
         self._id_factory = id_factory or _default_id_factory
         self._redactor = redactor or PersistenceRedactor()
+        if per_task_tool_call_limit is not None and per_task_tool_call_limit < 1:
+            raise ValueError("per-task Tool-call limit must be positive")
+        self._per_task_tool_call_limit = per_task_tool_call_limit
         self._lineages: dict[str, ReplanContext] = {}
 
     def restore_trusted_lineage(self, context: ReplanContext) -> None:
@@ -414,7 +418,10 @@ class PerspectivePlanner:
             )
 
         validation = self._validator.validate(
-            candidate, request, response.planning_model_id
+            candidate,
+            request,
+            response.planning_model_id,
+            per_task_tool_call_limit=request.per_task_tool_call_limit,
         )
         if not validation.valid:
             self._validation_failed_trace(
@@ -495,6 +502,7 @@ class PerspectivePlanner:
                 tool_calls=limits.max_tool_calls - usage.tool_calls,
             ),
             policy=policy,
+            per_task_tool_call_limit=self._per_task_tool_call_limit,
             replan_count=replan_count,
             reason_code=reason_code,
             reason=reason,

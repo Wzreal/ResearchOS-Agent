@@ -202,6 +202,8 @@ def test_phase11_planning_prompt_requires_exact_web_capabilities() -> None:
     assert '"web_search"' in phase11_prompt
     assert '"web_browser"' in phase11_prompt
     assert "exact subset of allowed_capability_ids" in phase11_prompt
+    assert "per_task_tool_call_limit" in phase11_prompt
+    assert "Prefer one primary evidence target per task" in phase11_prompt
     assert "exact subset of allowed_capability_ids" not in legacy_prompt
 
 

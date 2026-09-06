@@ -179,7 +179,15 @@ def deepseek_system_prompt(
             "returned URL, open it with web_browser, then finalize. A "
             "web_browser-only task is permitted only when its own objective "
             "already contains the concrete HTTP(S) source URL(s) to open; do "
-            "not synthesize or guess source deep links."
+            "not synthesize or guess source deep links. When the PlanningRequest "
+            "contains per_task_tool_call_limit, it is a hard limit for each "
+            "task's estimate.tool_calls and normal execution. A search plus "
+            "browser task consumes one call for search, so keep all remaining "
+            "browser or fallback calls within that limit. Prefer one primary "
+            "evidence target per task; do not request top-N, all, every, or "
+            "unbounded multi-page reading in one task. Split independent source, "
+            "person, or page targets into separate self-contained tasks, up to "
+            "the requested max_tasks."
         )
     stopping_instruction = ""
     if require_evidence_gap_for_web_search:

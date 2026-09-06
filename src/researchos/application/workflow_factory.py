@@ -405,6 +405,7 @@ class WorkflowFactory:
                 validator=DAGValidator(),
                 clock=clock,
                 trace_sink=trace,
+                per_task_tool_call_limit=bundle.max_agent_tool_calls,
             ),
             execution_policy_builder=ExecutionPolicyBuilder(),
             handoffs=self.workflow_handoffs(

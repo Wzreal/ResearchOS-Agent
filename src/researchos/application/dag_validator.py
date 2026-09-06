@@ -39,6 +39,8 @@ class DAGValidator:
         candidate: CandidatePlan,
         request: PlanningRequest,
         response_planning_model_id: str,
+        *,
+        per_task_tool_call_limit: int | None = None,
     ) -> ValidationResult:
         issues: list[ValidationIssue] = []
 
@@ -128,6 +130,19 @@ class DAGValidator:
         for task in candidate.tasks:
             task_id = task.task_id
             perspective_usage[task.perspective_id] += 1
+            if (
+                per_task_tool_call_limit is not None
+                and task.estimate.tool_calls > per_task_tool_call_limit
+            ):
+                add(
+                    ValidationIssueCode.TASK_TOOL_CALL_LIMIT_EXCEEDED,
+                    "task estimated Tool calls exceed the per-task limit",
+                    task_id=task_id,
+                    details={
+                        "actual": task.estimate.tool_calls,
+                        "limit": per_task_tool_call_limit,
+                    },
+                )
             if task_counts[task_id] > 1:
                 add(
                     ValidationIssueCode.DUPLICATE_TASK_ID,

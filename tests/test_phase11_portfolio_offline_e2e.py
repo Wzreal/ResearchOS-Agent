@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import UTC, datetime
 
 from researchos.adapters.checkpoint_filesystem import FilesystemCheckpointStore
@@ -314,7 +315,7 @@ class _FakePlanning:
                             "duration_milliseconds": 1_000,
                             "tokens": 100,
                             "cost_microunits": 100,
-                            "tool_calls": 1,
+                            "tool_calls": 2,
                         },
                         "policy": {"priority": 50, "required": True},
                     }
@@ -555,9 +556,18 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
 
     assert state.status is RunStatus.COMPLETED
     assert len(fake.planning.requests) == 1
+    assert (
+        fake.planning.requests[0].per_task_tool_call_limit
+        == bundle.max_agent_tool_calls
+    )
     assert len(fake.agent_adapter.requests) == 15
     assert len(fake.search.invocations) == 5
     assert len(fake.browser.invocations) == 5
+    task_tool_counts = Counter(
+        invocation.invocation.task_id
+        for invocation in (*fake.search.invocations, *fake.browser.invocations)
+    )
+    assert task_tool_counts == {task_id: 2 for task_id in _DYNAMIC_TASK_IDS}
     assert fake.claim_extraction.invocation_count == 1
     assert len(fake.verification.requests) == 4
     assert {role for role, _, _ in meter.measurements} == {

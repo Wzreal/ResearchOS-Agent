@@ -192,6 +192,7 @@ class ValidationIssueCode(StrEnum):
     BUDGET_TOKENS_EXCEEDED = "budget_tokens_exceeded"
     BUDGET_COST_EXCEEDED = "budget_cost_exceeded"
     BUDGET_TOOL_CALLS_EXCEEDED = "budget_tool_calls_exceeded"
+    TASK_TOOL_CALL_LIMIT_EXCEEDED = "task_tool_call_limit_exceeded"
 
 
 class ValidationIssue(ContractModel):
@@ -327,6 +328,9 @@ class PlanningRequest(ContractModel):
     allowed_capability_ids: tuple[SafeId, ...]
     remaining_budget: RemainingBudget
     policy: PlanningPolicy
+    # Optional Phase 11 composition input. Legacy planners retain their prior
+    # semantics when this constraint is absent.
+    per_task_tool_call_limit: int | None = Field(default=None, ge=1)
     replan_count: int = Field(default=0, ge=0)
     reason_code: SafeId | None = None
     reason: Annotated[str, StringConstraints(min_length=1, max_length=1_000)] | None = (

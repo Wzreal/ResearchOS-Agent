@@ -110,8 +110,13 @@ def _messages(
     require_explicit_web_search_capability: bool = False,
     require_evidence_gap_for_web_search: bool = False,
 ) -> tuple[dict[str, str], ...]:
+    payload = request.model_dump(mode="json")
+    # Preserve Phase 1-10 planning request bytes when the Phase 11-only
+    # per-task limit is not selected.
+    if role_id == "planning" and payload.get("per_task_tool_call_limit") is None:
+        payload.pop("per_task_tool_call_limit", None)
     content = json.dumps(
-        request.model_dump(mode="json"),
+        payload,
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
