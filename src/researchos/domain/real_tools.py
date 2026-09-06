@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -34,6 +35,23 @@ class RealWebAgentToolCall(AgentToolCall):
 
 class RealWebAgentToolDecision(AgentToolDecision):
     tool_call: RealWebAgentToolCall
+
+
+class EvidenceGapCategory(StrEnum):
+    """Safe, bounded reasons for another Phase 11 web lookup."""
+
+    AUTHORITATIVE_SOURCE_MISSING = "authoritative_source_missing"
+    CORROBORATING_SOURCE_MISSING = "corroborating_source_missing"
+    CORE_FACT_MISSING = "core_fact_missing"
+    CITATION_LOCATOR_MISSING = "citation_locator_missing"
+    SOURCE_CONFLICT_UNRESOLVED = "source_conflict_unresolved"
+
+
+class Phase11RealWebAgentToolDecision(RealWebAgentToolDecision):
+    """A web lookup is valid only when a bounded evidence gap remains."""
+
+    evidence_status: Literal["insufficient"]
+    remaining_evidence_gap: EvidenceGapCategory
 
 
 class RealPhase9CAgentToolCall(AgentToolCall):

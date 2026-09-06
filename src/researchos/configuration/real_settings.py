@@ -184,6 +184,7 @@ class RealModelSettings(ContractModel):
             in {
                 "agent-tool-decision-v2",
                 "agent-tool-decision-v3",
+                "agent-tool-decision-v4",
                 "claim-extraction-response-v1",
             }
         )

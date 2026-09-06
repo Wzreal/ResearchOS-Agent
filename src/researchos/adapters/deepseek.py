@@ -19,9 +19,11 @@ from researchos.configuration.real_settings import canonicalize_base_endpoint
 from researchos.configuration.validation import (
     PHASE9B_AGENT_RESPONSE_CONTRACT,
     PHASE9C_AGENT_RESPONSE_CONTRACT,
+    PHASE11_AGENT_RESPONSE_CONTRACT,
     Phase9ARealAgentDecision,
     Phase9BRealAgentDecision,
     Phase9CRealAgentDecision,
+    Phase11RealAgentDecision,
     deepseek_prompt_content_hash,
     deepseek_response_contract,
     deepseek_system_prompt,
@@ -66,7 +68,8 @@ def _validate_binding(
         raise RunConfigurationError("DeepSeek base endpoint must use HTTPS")
     web_tools = (
         role_id == "agent"
-        and settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
+        and settings.response_contract_version
+        in {PHASE9B_AGENT_RESPONSE_CONTRACT, PHASE11_AGENT_RESPONSE_CONTRACT}
     )
     retrieval_tools = (
         role_id == "agent"
@@ -76,6 +79,9 @@ def _validate_binding(
         role_id,
         enable_web_tools=web_tools,
         enable_retrieval_tools=retrieval_tools,
+        require_evidence_gap_for_web_search=(
+            settings.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
+        ),
         web_search_max_results=web_search_max_results,
         require_explicit_web_search_capability=(
             settings.phase11_planning_total_timeout_enabled
@@ -83,7 +89,12 @@ def _validate_binding(
     ):
         raise RunConfigurationError("DeepSeek prompt content hash differs")
     if settings.response_contract_version != deepseek_response_contract(
-        role_id, enable_web_tools=web_tools, enable_retrieval_tools=retrieval_tools
+        role_id,
+        enable_web_tools=web_tools,
+        enable_retrieval_tools=retrieval_tools,
+        require_evidence_gap_for_web_search=(
+            settings.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
+        ),
     ):
         raise RunConfigurationError("DeepSeek response contract differs")
 
@@ -97,6 +108,7 @@ def _messages(
     web_search_max_results: int | None = None,
     planning_model_id: str | None = None,
     require_explicit_web_search_capability: bool = False,
+    require_evidence_gap_for_web_search: bool = False,
 ) -> tuple[dict[str, str], ...]:
     content = json.dumps(
         request.model_dump(mode="json"),
@@ -112,6 +124,9 @@ def _messages(
         web_search_max_results=web_search_max_results,
         require_explicit_web_search_capability=(
             require_explicit_web_search_capability
+        ),
+        require_evidence_gap_for_web_search=(
+            require_evidence_gap_for_web_search
         ),
     )
     if planning_model_id is not None:
@@ -302,7 +317,11 @@ class DeepSeekAgent:
         self._transport = transport
         self._authorizer = authorizer
         self._web_tools = (
-            bound.settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
+            bound.settings.response_contract_version
+            in {PHASE9B_AGENT_RESPONSE_CONTRACT, PHASE11_AGENT_RESPONSE_CONTRACT}
+        )
+        self._phase11_evidence_gap_contract = (
+            bound.settings.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
         )
         self._retrieval_tools = (
             bound.settings.response_contract_version == PHASE9C_AGENT_RESPONSE_CONTRACT
@@ -374,6 +393,9 @@ class DeepSeekAgent:
                     enable_web_tools=self._web_tools,
                     enable_retrieval_tools=self._retrieval_tools,
                     web_search_max_results=self._web_search_max_results,
+                    require_evidence_gap_for_web_search=(
+                        self._phase11_evidence_gap_contract
+                    ),
                 ),
                 cancellation=cancellation,
                 deadline=request.context.deadline,
@@ -401,6 +423,8 @@ class DeepSeekAgent:
             contract = (
                 Phase9CRealAgentDecision
                 if self._retrieval_tools
+                else Phase11RealAgentDecision
+                if self._phase11_evidence_gap_contract
                 else Phase9BRealAgentDecision
                 if self._web_tools
                 else Phase9ARealAgentDecision

@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from researchos import cli
 from researchos.adapters.openai_compatible import OpenAICompatibleChatTransport
@@ -25,7 +26,11 @@ from researchos.configuration.phase11 import (
     phase11_real_run_config,
 )
 from researchos.configuration.phase11_benchmark import build_phase11_real_benchmark_v1
-from researchos.configuration.validation import deepseek_system_prompt
+from researchos.configuration.validation import (
+    PHASE11_AGENT_RESPONSE_CONTRACT,
+    Phase11RealAgentDecision,
+    deepseek_system_prompt,
+)
 from researchos.domain.contracts import (
     BudgetLimits,
     RunInput,
@@ -33,6 +38,8 @@ from researchos.domain.contracts import (
     TraceEventType,
     model_sha256,
 )
+from researchos.domain.real_tools import EvidenceGapCategory
+from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 from researchos.domain.verification_runtime import max_model_calls
 
 
@@ -111,6 +118,40 @@ def test_build_real_constructs_without_network_or_credentials(tmp_path) -> None:
     )
     assert coordinator._planning_reservation.duration_milliseconds == 37
     assert not list(tmp_path.rglob("real_composition.json"))
+
+
+def test_phase11_web_search_requires_bounded_evidence_gap_before_dispatch() -> None:
+    settings = _settings()
+    agent = settings.model_for_role("agent")
+    assert agent.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
+    prompt = deepseek_system_prompt(
+        "agent",
+        enable_web_tools=True,
+        web_search_max_results=5,
+        require_evidence_gap_for_web_search=True,
+    )
+    assert "collected observations" in prompt
+    assert "return a final decision" in prompt
+    gapless = {
+        "kind": "tool_call",
+        "tool_call": {
+            "tool_call_id": "search_more",
+            "capability_id": "web_search",
+            "input": {"input_type": "search", "query": "more", "limit": 5},
+        },
+        "usage": RuntimeResourceAmount().model_dump(mode="json"),
+        "usage_certainty": UsageCertainty.EXACT.value,
+    }
+    with pytest.raises(ValidationError):
+        TypeAdapter(Phase11RealAgentDecision).validate_python(gapless)
+    admitted = TypeAdapter(Phase11RealAgentDecision).validate_python(
+        {
+            **gapless,
+            "evidence_status": "insufficient",
+            "remaining_evidence_gap": EvidenceGapCategory.CORROBORATING_SOURCE_MISSING,
+        }
+    )
+    assert admitted.evidence_status == "insufficient"
 
 
 def test_phase11_planning_prompt_requires_explicit_web_search_capability() -> None:

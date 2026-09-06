@@ -109,6 +109,9 @@ def load_real_integration_settings(
     phase11_input_admission_enabled = bool(
         values.get("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
     )
+    phase11_web_evidence_contract_enabled = (
+        phase11_input_admission_enabled and enable_web_tools
+    )
     roles = ("agent", "planning", "verification")
     if require_phase10_roles:
         roles = ("agent", "planning", "claim_extraction", "verification")
@@ -187,11 +190,17 @@ def load_real_integration_settings(
                     require_explicit_web_search_capability=(
                         phase11_planning_total_timeout_enabled
                     ),
+                    require_evidence_gap_for_web_search=(
+                        role == "agent" and phase11_web_evidence_contract_enabled
+                    ),
                 ),
                 response_contract_version=deepseek_response_contract(
                     role,
                     enable_web_tools=(role == "agent" and enable_web_tools),
                     enable_retrieval_tools=(role == "agent" and enable_retrieval_tools),
+                    require_evidence_gap_for_web_search=(
+                        role == "agent" and phase11_web_evidence_contract_enabled
+                    ),
                 ),
                 policy=policy,
                 credential_slot_id=credential_slot_id,
