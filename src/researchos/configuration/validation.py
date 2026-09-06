@@ -163,9 +163,11 @@ def deepseek_system_prompt(
         if role_id != "planning":
             raise ValueError("explicit web-search planning rule is planning-only")
         capability_instruction = (
-            " For every task whose objective directs web search, declare "
-            "required_capability_ids exactly as [\"web_search\"]. A task that "
-            "does not invoke web search must declare its own exact capability list."
+            " For every task, declare required_capability_ids as the exact "
+            "subset of allowed_capability_ids needed by that task. A task whose "
+            "objective directs web search must include \"web_search\"; a task "
+            "that reads a discovered source must include \"web_browser\". "
+            "Do not declare capabilities that the task will not use."
         )
     stopping_instruction = ""
     if require_evidence_gap_for_web_search:

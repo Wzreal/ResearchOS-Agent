@@ -62,7 +62,7 @@ def _settings():
         "RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS": "20000000",
         "RESEARCHOS_DEEPSEEK_BASE_ENDPOINT": "https://api.deepseek.com",
         "RESEARCHOS_DEEPSEEK_ADAPTER_VERSION": "v1",
-        "RESEARCHOS_REAL_CAPABILITIES": "web_search",
+        "RESEARCHOS_REAL_CAPABILITIES": "web_browser,web_search",
         "RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS": "90000",
         "RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS": "37",
     }
@@ -154,14 +154,16 @@ def test_phase11_web_search_requires_bounded_evidence_gap_before_dispatch() -> N
     assert admitted.evidence_status == "insufficient"
 
 
-def test_phase11_planning_prompt_requires_explicit_web_search_capability() -> None:
+def test_phase11_planning_prompt_requires_exact_web_capabilities() -> None:
     phase11_prompt = deepseek_system_prompt(
         "planning", require_explicit_web_search_capability=True
     )
     legacy_prompt = deepseek_system_prompt("planning")
 
-    assert 'required_capability_ids exactly as ["web_search"]' in phase11_prompt
-    assert "required_capability_ids exactly" not in legacy_prompt
+    assert '"web_search"' in phase11_prompt
+    assert '"web_browser"' in phase11_prompt
+    assert "exact subset of allowed_capability_ids" in phase11_prompt
+    assert "exact subset of allowed_capability_ids" not in legacy_prompt
 
 
 def test_phase11_input_admission_reserves_the_enforced_input_cap() -> None:

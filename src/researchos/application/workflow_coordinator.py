@@ -7,6 +7,7 @@ from collections.abc import Callable
 from researchos.application.async_dag_executor import AsyncDAGExecutor
 from researchos.application.claim_extractor import ClaimExtractor
 from researchos.application.durable_verification import DurableVerificationCoordinator
+from researchos.application.errors import EvidenceStoreNotFound
 from researchos.application.execution_policy_builder import ExecutionPolicyBuilder
 from researchos.application.perspective_planner import PerspectivePlanner
 from researchos.application.run_manager import RunManager
@@ -150,7 +151,16 @@ class WorkflowCoordinator:
                     state.run_id, RunStatus.PARTIAL, reason="execution_partial"
                 )
             state = self._runs.load(state.run_id)
-            if not self._evidence.load(state.run_id).evidence:
+            # An eligible observation creates the store through EvidenceMemory.
+            # Its absence is therefore the normal durable representation of a
+            # successful execution that produced no admissible Evidence, rather
+            # than a persistence failure.  Do not broaden this boundary: corrupt
+            # or otherwise unavailable stores must still fail visibly.
+            try:
+                evidence = self._evidence.load(state.run_id).evidence
+            except EvidenceStoreNotFound:
+                evidence = ()
+            if not evidence:
                 return self._runs.finalize(
                     state.run_id, RunStatus.PARTIAL, reason="no_eligible_evidence"
                 )

@@ -46,6 +46,8 @@ from researchos.domain.planning import PlanningModelResponse
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 from researchos.domain.tools import (
     AdapterMode,
+    BrowserRequest,
+    BrowserResult,
     SearchContentKind,
     SearchHitV2,
     SearchRequest,
@@ -100,7 +102,7 @@ def _settings(
         "RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS": "20000000",
         "RESEARCHOS_DEEPSEEK_BASE_ENDPOINT": "https://api.deepseek.com/",
         "RESEARCHOS_DEEPSEEK_ADAPTER_VERSION": "v1",
-        "RESEARCHOS_REAL_CAPABILITIES": "web_search",
+        "RESEARCHOS_REAL_CAPABILITIES": "web_browser,web_search",
         "RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS": "90000",
         "RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS": "90000",
         "RESEARCHOS_TAVILY_MICROUNITS_PER_CREDIT": "100000",
@@ -176,10 +178,10 @@ def _portfolio_profile(settings):
     )
     allocation = WorkflowBudgetAllocation(
         total=RuntimeResourceAmount(
-            duration_milliseconds=1_080_000,
-            tokens=provider.total_tokens * 12,
-            cost_microunits=provider.cost_microunits * 12 + tavily_cost * 3,
-            tool_calls=15,
+            duration_milliseconds=3_540_000,
+            tokens=provider.total_tokens * 21,
+            cost_microunits=provider.cost_microunits * 21 + tavily_cost * 5,
+            tool_calls=31,
         ),
         planning=RuntimeResourceAmount(
             duration_milliseconds=90_000,
@@ -188,10 +190,10 @@ def _portfolio_profile(settings):
             tool_calls=1,
         ),
         execution=RuntimeResourceAmount(
-            duration_milliseconds=540_000,
-            tokens=provider.total_tokens * 6,
-            cost_microunits=provider.cost_microunits * 6 + tavily_cost * 3,
-            tool_calls=9,
+            duration_milliseconds=3_000_000,
+            tokens=provider.total_tokens * 15,
+            cost_microunits=provider.cost_microunits * 15 + tavily_cost * 5,
+            tool_calls=25,
         ),
         claim_extraction=RuntimeResourceAmount(
             duration_milliseconds=90_000,
@@ -208,12 +210,12 @@ def _portfolio_profile(settings):
     )
     template = profile.execution.task_policies[0].model_copy(
         update={
-            "timeout_milliseconds": 180_000,
+            "timeout_milliseconds": 600_000,
             "reservation": RuntimeResourceAmount(
-                duration_milliseconds=180_000,
-                tokens=provider.total_tokens * 2,
-                cost_microunits=provider.cost_microunits * 2 + tavily_cost,
-                tool_calls=3,
+                duration_milliseconds=600_000,
+                tokens=provider.total_tokens * 3,
+                cost_microunits=provider.cost_microunits * 3 + tavily_cost,
+                tool_calls=5,
             ),
         }
     )
@@ -254,10 +256,12 @@ def _bundle(settings):
         benchmark=build_phase11_real_benchmark_v1(),
         evaluation_policy=phase11_evaluation_policy(profile),
         real_settings_hash=model_sha256(settings),
-        capability_ids=("web_search",),
+        capability_ids=tuple(
+            item.capability_id for item in settings.capability_settings
+        ),
         approved_refs=("feat/phase-11-real-evaluation",),
-        max_agent_steps=2,
-        max_agent_tool_calls=1,
+        max_agent_steps=3,
+        max_agent_tool_calls=2,
         system_commit_sha=profile.system_commit_sha,
         system_version=profile.system_version,
         max_batch_cost_microunits=50_000_000,
@@ -298,7 +302,7 @@ class _FakePlanning:
                             if index == 0
                             else [{"task_id": _DYNAMIC_TASK_IDS[index - 1]}]
                         ),
-                        "required_capability_ids": ["web_search"],
+                        "required_capability_ids": ["web_browser", "web_search"],
                         "expected_outputs": [
                             {
                                 "output_id": f"{task_id}_output",
@@ -327,13 +331,16 @@ class _FakePlanning:
 
 
 class _FakeAgent:
-    def __init__(self, reservation, meter: _RequestMeter) -> None:
+    def __init__(
+        self, reservation, meter: _RequestMeter, *, use_browser: bool = True
+    ) -> None:
         self.provider_call_reservation = reservation
         self.provider_admission_profile = (
             ProviderAdmissionProfile.ACCUMULATED_REMAINING_V1
         )
         self._meter = meter
         self.requests = []
+        self._use_browser = use_browser
 
     async def decide(self, request, _cancellation):
         self.requests.append(request)
@@ -344,6 +351,16 @@ class _FakeAgent:
                     tool_call_id=f"{request.context.task_id}_search",
                     capability_id="web_search",
                     input=SearchRequest(query=request.context.task.objective),
+                ),
+                usage=RuntimeResourceAmount(),
+                usage_certainty=UsageCertainty.EXACT,
+            )
+        if request.agent_step == 2 and self._use_browser:
+            return AgentToolDecision(
+                tool_call=AgentToolCall(
+                    tool_call_id=f"{request.context.task_id}_browser",
+                    capability_id="web_browser",
+                    input=BrowserRequest(url="https://example.test/source"),
                 ),
                 usage=RuntimeResourceAmount(),
                 usage_certainty=UsageCertainty.EXACT,
@@ -370,11 +387,7 @@ class _FakeWebSearch:
 
     async def invoke_authorized(self, envelope, _cancellation):
         self.invocations.append(envelope)
-        locator = (
-            "https://www.nasa.gov/mission/artemis-ii/"
-            if envelope.invocation.task_id == "artemis_mission"
-            else "https://www.nasa.gov/humans-in-space/artemis-ii/"
-        )
+        locator = "https://example.test/source"
         return ToolInvocationResult(
             status=ToolInvocationStatus.SUCCEEDED,
             output=SearchResultV2(
@@ -383,14 +396,41 @@ class _FakeWebSearch:
                     SearchHitV2(
                         locator=locator,
                         url=locator,
-                        title="Offline NASA Artemis reference",
-                        snippet="Deterministic offline Artemis evidence.",
-                        content_kind=SearchContentKind.SOURCE_EXCERPT,
+                        title="Offline discovered source",
+                        snippet="Discovery metadata only.",
+                        content_kind=SearchContentKind.PROVIDER_SUMMARY_METADATA,
                         retrieved_at=_NOW,
                         adapter_id=self.descriptor.adapter_id,
                         provenance={"provider_id": "offline_fake"},
                     ),
                 ),
+            ),
+            usage=ToolUsage(
+                duration_milliseconds=1,
+                cost_microunits=self.provider_call_reservation.cost_microunits,
+                tool_calls=1,
+            ),
+            usage_certainty=UsageCertainty.UPPER_BOUND,
+        )
+
+
+class _FakeWebBrowser:
+    def __init__(self, descriptor, reservation) -> None:
+        self.descriptor = descriptor
+        self.provider_call_reservation = reservation
+        self.invocations = []
+
+    async def invoke_authorized(self, envelope, _cancellation):
+        self.invocations.append(envelope)
+        return ToolInvocationResult(
+            status=ToolInvocationStatus.SUCCEEDED,
+            output=BrowserResult(
+                adapter_id=self.descriptor.adapter_id,
+                final_url=envelope.invocation.input.url,
+                title="Offline source document",
+                content="Deterministic source excerpt from a fetched document.",
+                content_hash="fed2f69d54e2a220704e2b8f7657553dec31130741f7523e712aaa45ec4adb4b",
+                retrieved_at=_NOW,
             ),
             usage=ToolUsage(
                 duration_milliseconds=1,
@@ -433,18 +473,27 @@ class _FakeVerification:
 
 
 class _FakeIntegrations:
-    def __init__(self, settings, meter: _RequestMeter) -> None:
+    def __init__(
+        self, settings, meter: _RequestMeter, *, use_browser: bool = True
+    ) -> None:
         self.planning = _FakePlanning(meter)
         self.agent_adapter = _FakeAgent(
-            settings.model_for_role("agent").suboperation_reservation(), meter
+            settings.model_for_role("agent").suboperation_reservation(),
+            meter,
+            use_browser=use_browser,
         )
         capability = settings.capability_for_id("web_search")
         self.search = _FakeWebSearch(
             capability.descriptor(), capability.provider_reservation
         )
+        browser = settings.capability_for_id("web_browser")
+        self.browser = _FakeWebBrowser(
+            browser.descriptor(), browser.provider_reservation
+        )
         self.claim_extraction = _FakeClaimExtraction(meter)
         self.verification = _FakeVerification(meter)
         self._registry = CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL}))
+        self._registry.register(self.browser)
         self._registry.register(self.search)
 
     def planning_model(self, _run_id):
@@ -506,8 +555,9 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
 
     assert state.status is RunStatus.COMPLETED
     assert len(fake.planning.requests) == 1
-    assert len(fake.agent_adapter.requests) == 10
+    assert len(fake.agent_adapter.requests) == 15
     assert len(fake.search.invocations) == 5
+    assert len(fake.browser.invocations) == 5
     assert fake.claim_extraction.invocation_count == 1
     assert len(fake.verification.requests) == 4
     assert {role for role, _, _ in meter.measurements} == {
@@ -524,8 +574,19 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
     tool_completed = sum(
         item.event_type is TraceEventType.TOOL_INVOCATION_SUCCEEDED for item in trace
     )
-    assert tool_completed == 5
-    assert FilesystemEvidenceStore(tmp_path).load(state.run_id).evidence
+    assert tool_completed == 10
+    evidence_before_resume = FilesystemEvidenceStore(tmp_path).load(state.run_id)
+    assert len(evidence_before_resume.evidence) == 1
+    assert evidence_before_resume.sources[0].canonical_locator == (
+        "https://example.test/source"
+    )
+    assert {receipt.task_id for receipt in evidence_before_resume.receipts} == set(
+        _DYNAMIC_TASK_IDS
+    )
+    assert all(
+        receipt.tool_call_id.endswith("_browser")
+        for receipt in evidence_before_resume.receipts
+    )
     graph = FilesystemClaimGraphStore(tmp_path).load(state.run_id)
     assert graph.claims and graph.claim_revisions
     assert graph.edges and graph.edge_revisions and graph.receipts
@@ -537,7 +598,7 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
         policy.task_id for policy in checkpoint.execution_policy.tasks
     } == set(_DYNAMIC_TASK_IDS)
     assert all(
-        task.required_capability_ids == ("web_search",)
+        task.required_capability_ids == ("web_browser", "web_search")
         for task in checkpoint.dag.tasks
     )
     resumed = WorkflowFactory(tmp_path).build_real(
@@ -557,10 +618,61 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
             expected_config=phase11_real_run_config(bundle, settings),
         )
     ) == state
+    assert (
+        FilesystemEvidenceStore(tmp_path).load(state.run_id) == evidence_before_resume
+    )
     persisted = FilesystemRunStore(tmp_path).load(state.run_id)
-    assert persisted.budget.usage.cost_microunits <= 6_198_240
-    assert persisted.budget.usage.tokens <= 491_520
-    assert persisted.budget.usage.tool_calls <= 15
+    assert persisted.budget.usage.cost_microunits <= (
+        settings.model_for_role("planning").policy.provider_call_reservation.cost_microunits
+        * 21
+        + settings.capability_for_id("web_search").provider_reservation.cost_microunits
+        * 5
+    )
+    assert persisted.budget.usage.tokens <= (
+        settings.model_for_role("planning").policy.provider_call_reservation.total_tokens
+        * 21
+    )
+    assert persisted.budget.usage.tool_calls <= 31
+
+
+def test_phase11_search_metadata_without_browser_evidence_finalizes_partial(
+    tmp_path,
+) -> None:
+    settings = _settings(32_768, 8_192)
+    bundle = _bundle(settings)
+    factory = WorkflowFactory(tmp_path)
+    coordinator = factory.build_real(
+        bundle=bundle,
+        settings=settings,
+        secrets=EnvironmentSecretSource(
+            {
+                "researchos_deepseek_api_key": "offline-test-secret",
+                "researchos_tavily_api_key": "offline-test-secret",
+            }
+        ),
+    )
+    runtime = coordinator._runtime_binder.__self__
+    fake = _FakeIntegrations(settings, _RequestMeter(), use_browser=False)
+    runtime._integrations = fake
+    case = next(
+        item
+        for item in bundle.benchmark.cases
+        if item.case_id == "p11_citation_chain"
+    )
+
+    state = asyncio.run(
+        coordinator.create_and_execute(
+            RunInput(query=case.query), phase11_real_run_config(bundle, settings)
+        )
+    )
+
+    assert state.status is RunStatus.PARTIAL
+    assert state.terminal_reason == "no_eligible_evidence"
+    assert len(fake.search.invocations) == 5
+    assert not fake.browser.invocations
+    assert fake.claim_extraction.invocation_count == 0
+    assert not fake.verification.requests
+    assert not (tmp_path / state.run_id / "evidence.jsonl").exists()
 
 
 def test_phase11_portfolio_input_cap_candidates_cover_measured_requests() -> None:
