@@ -758,6 +758,7 @@ class VerificationOperationManager:
                 "model_call_key": prepared.model_call_key,
                 "response_hash": committed.canonical_payload_hash,
                 "usage_certainty": committed.usage_certainty.value,
+                "provider_diagnostics_v1": response.provider_diagnostics,
             },
         )
         self._save_update(

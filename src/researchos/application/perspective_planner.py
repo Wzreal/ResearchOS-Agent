@@ -37,6 +37,7 @@ from researchos.domain.planning import (
     ReplanResult,
     ValidationResult,
 )
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.runtime import RuntimeResourceAmount
 from researchos.domain.workflow import Phase10PlanningAdmission
 from researchos.interfaces.lifecycle import Clock, TraceSink
@@ -98,6 +99,7 @@ class PerspectivePlanner:
         trace_sink: TraceSink,
         id_factory: IdFactory | None = None,
         redactor: PersistenceRedactor | None = None,
+        per_task_tool_call_limit: int | None = None,
     ) -> None:
         self._model = model
         self._validator = validator
@@ -105,6 +107,9 @@ class PerspectivePlanner:
         self._trace = trace_sink
         self._id_factory = id_factory or _default_id_factory
         self._redactor = redactor or PersistenceRedactor()
+        if per_task_tool_call_limit is not None and per_task_tool_call_limit < 1:
+            raise ValueError("per-task Tool-call limit must be positive")
+        self._per_task_tool_call_limit = per_task_tool_call_limit
         self._lineages: dict[str, ReplanContext] = {}
 
     def restore_trusted_lineage(self, context: ReplanContext) -> None:
@@ -363,6 +368,9 @@ class PerspectivePlanner:
                     "plan_id": request.plan_id,
                     "error_code": error.code,
                     "retryable": error.retryable,
+                    "provider_diagnostics_v1": validate_provider_diagnostics(
+                        exc.provider_diagnostics
+                    ),
                 },
             )
             return PlanningResult(
@@ -384,10 +392,16 @@ class PerspectivePlanner:
             attributes={
                 "plan_id": request.plan_id,
                 "planning_model_id": response.planning_model_id,
+                "provider_diagnostics_v1": response.provider_diagnostics,
             },
         )
         try:
-            candidate = CandidatePlan.model_validate(response.payload)
+            # ``plan_id`` is request-scoped host identity, not semantic model
+            # output. Bind it before admission so a provider cannot make the
+            # workflow depend on copying a generated identifier exactly.
+            candidate = CandidatePlan.model_validate(
+                {**response.payload, "plan_id": request.plan_id}
+            )
         except ValidationError as exc:
             validation = self._validator.malformed_result(
                 self._candidate_validation_errors(exc)
@@ -409,7 +423,10 @@ class PerspectivePlanner:
             )
 
         validation = self._validator.validate(
-            candidate, request, response.planning_model_id
+            candidate,
+            request,
+            response.planning_model_id,
+            per_task_tool_call_limit=request.per_task_tool_call_limit,
         )
         if not validation.valid:
             self._validation_failed_trace(
@@ -490,6 +507,7 @@ class PerspectivePlanner:
                 tool_calls=limits.max_tool_calls - usage.tool_calls,
             ),
             policy=policy,
+            per_task_tool_call_limit=self._per_task_tool_call_limit,
             replan_count=replan_count,
             reason_code=reason_code,
             reason=reason,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -16,6 +16,7 @@ from researchos.domain.contracts import (
     _require_aware,
     model_sha256,
 )
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 
 CLAIM_EXTRACTION_OPERATION_SCHEMA_VERSION = 1
@@ -51,11 +52,17 @@ class ClaimExtractionOperation(ContractModel):
     usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN
     mutation_keys: tuple[Sha256, ...] = ()
     failure_code: SafeId | None = None
+    provider_diagnostics: dict[str, Any] | None = Field(default=None, exclude=True)
     created_at: datetime
     updated_at: datetime
 
     _aware_created = field_validator("created_at")(_require_aware)
     _aware_updated = field_validator("updated_at")(_require_aware)
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_are_json(cls, value: dict[str, Any] | None):
+        return validate_provider_diagnostics(value)
 
     @model_validator(mode="after")
     def state_matches_durable_payload(self) -> ClaimExtractionOperation:
@@ -91,6 +98,12 @@ class ClaimExtractionOperationEnvelope(ContractModel):
     envelope_version: Literal[1] = 1
     operation: ClaimExtractionOperation
     payload_sha256: Sha256
+    provider_diagnostics: dict[str, Any] | None = None
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_are_json(cls, value: dict[str, Any] | None):
+        return validate_provider_diagnostics(value)
 
     @model_validator(mode="after")
     def payload_hash_matches(self) -> ClaimExtractionOperationEnvelope:

@@ -215,6 +215,10 @@ class TavilySearchTool:
                 True,
                 started,
                 certainty=certainty,
+                dispatch_classification=(
+                    "dispatched_outcome_unknown" if exc.dispatched else "not_dispatched"
+                ),
+                http_dispatch_attempted=exc.dispatched,
             )
         if response.status_code != 200:
             retryable = response.status_code == 429 or response.status_code >= 500
@@ -223,6 +227,9 @@ class TavilySearchTool:
                 retryable,
                 started,
                 certainty=UsageCertainty.UPPER_BOUND,
+                dispatch_classification="response_received",
+                http_dispatch_attempted=True,
+                http_response_received=True,
             )
         content_types = tuple(
             value.lower().split(";", 1)[0]
@@ -244,6 +251,9 @@ class TavilySearchTool:
                 False,
                 started,
                 certainty=UsageCertainty.UPPER_BOUND,
+                dispatch_classification="response_received",
+                http_dispatch_attempted=True,
+                http_response_received=True,
             )
         try:
             parsed = _ProviderResponse.model_validate_json(response.body)
@@ -296,6 +306,9 @@ class TavilySearchTool:
                 False,
                 started,
                 certainty=UsageCertainty.UPPER_BOUND,
+                dispatch_classification="response_received",
+                http_dispatch_attempted=True,
+                http_response_received=True,
             )
         return ToolInvocationResult(
             status=ToolInvocationStatus.SUCCEEDED,
@@ -305,6 +318,13 @@ class TavilySearchTool:
             ),
             usage=self._usage(started),
             usage_certainty=UsageCertainty.UPPER_BOUND,
+            provider_diagnostics=self._diagnostics(
+                dispatch_classification="response_received",
+                http_dispatch_attempted=True,
+                http_response_received=True,
+                duration_milliseconds=max(0, int((monotonic() - started) * 1_000)),
+                result_count=len(hits),
+            ),
         )
 
     def _usage(self, started: float) -> ToolUsage:
@@ -321,6 +341,9 @@ class TavilySearchTool:
         started: float,
         *,
         certainty: UsageCertainty = UsageCertainty.EXACT,
+        dispatch_classification: str = "not_dispatched",
+        http_dispatch_attempted: bool = False,
+        http_response_received: bool = False,
     ) -> ToolInvocationResult:
         usage = None if certainty is UsageCertainty.UNKNOWN else self._usage(started)
         if certainty is UsageCertainty.EXACT:
@@ -337,7 +360,46 @@ class TavilySearchTool:
             ),
             usage=usage,
             usage_certainty=certainty,
+            provider_diagnostics=self._diagnostics(
+                dispatch_classification=dispatch_classification,
+                http_dispatch_attempted=http_dispatch_attempted,
+                http_response_received=http_response_received,
+                duration_milliseconds=max(0, int((monotonic() - started) * 1_000)),
+                error_code=code,
+                retryable=retryable,
+                settlement=usage,
+            ),
         )
+
+    def _diagnostics(
+        self,
+        *,
+        dispatch_classification: str,
+        http_dispatch_attempted: bool,
+        http_response_received: bool,
+        duration_milliseconds: int,
+        error_code: str | None = None,
+        retryable: bool = False,
+        result_count: int | None = None,
+        settlement: ToolUsage | None = None,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "tool_diagnostics_v1",
+            "adapter_id": self.descriptor.adapter_id,
+            "dispatch_classification": dispatch_classification,
+            "http_dispatch_attempted": http_dispatch_attempted,
+            "http_response_received": http_response_received,
+            "error_code": error_code,
+            "retryable": retryable,
+            "duration_milliseconds": duration_milliseconds,
+            "result_count": result_count,
+            "provider_reservation": self.provider_call_reservation.model_dump(
+                mode="json"
+            ),
+            "settlement": (
+                None if settlement is None else settlement.model_dump(mode="json")
+            ),
+        }
 
 
 class HttpxTavilyTransport:

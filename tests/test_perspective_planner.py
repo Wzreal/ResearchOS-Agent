@@ -76,6 +76,7 @@ def test_mock_planner_returns_validated_dag_and_ordered_trace() -> None:
     assert result.status is PlanningStatus.VALIDATED
     assert result.validation is not None and result.validation.valid
     assert result.validated_dag is not None
+    assert result.validated_dag.plan_id == model.requests[0].plan_id
     assert result.run_revision == state.revision
     assert result.validated_dag.run_revision == state.revision
     planning_request = model.requests[0]
@@ -97,6 +98,30 @@ def test_mock_planner_returns_validated_dag_and_ordered_trace() -> None:
         event.revision == state.revision
         for event in trace.read(state.run_id)
         if event.event_type.value.startswith("planning.")
+    )
+
+
+def test_provider_plan_id_is_bound_to_the_host_planning_request() -> None:
+    state, trace, clock, ids = planning_state()
+
+    def foreign_plan_id(request):
+        return PlanningModelResponse(
+            planning_model_id="mock_model",
+            payload=candidate_payload(request, plan_id="plan_provider_generated"),
+        )
+
+    model = MockPlanningModel(
+        {PlanningFixtureKey("normalized query", 0, None): foreign_plan_id}
+    )
+
+    result = planner_for(model, trace, clock, ids).plan(state, planning_policy())
+
+    assert result.status is PlanningStatus.VALIDATED
+    assert result.validated_dag is not None
+    assert result.validated_dag.plan_id == model.requests[0].plan_id
+    assert all(
+        event.event_type is not TraceEventType.PLANNING_VALIDATION_FAILED
+        for event in trace.read(state.run_id)
     )
 
 

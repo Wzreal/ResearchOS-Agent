@@ -36,6 +36,8 @@ class EnvironmentSecretSource:
 
 def load_real_integration_settings(
     environ: Mapping[str, str] | None = None,
+    *,
+    require_phase10_roles: bool = False,
 ) -> RealIntegrationSettings:
     values = environ if environ is not None else os.environ
 
@@ -84,6 +86,14 @@ def load_real_integration_settings(
     capability_settings = tuple(
         sorted(capability_settings, key=lambda item: item.capability_id)
     )
+    web_search_max_results = next(
+        (
+            item.tavily_policy.provider_request.max_results
+            for item in capability_settings
+            if item.capability_id == "web_search" and item.tavily_policy is not None
+        ),
+        None,
+    )
     enable_web_tools = any(
         item.capability_id in {"web_browser", "web_search"}
         for item in capability_settings
@@ -93,11 +103,21 @@ def load_real_integration_settings(
     )
     enable_agent_tool_calls = enable_web_tools or enable_retrieval_tools
     models: list[RealModelSettings] = []
-    for role in ("agent", "planning", "verification"):
+    # This already-required explicit Phase 11 marker selects the stricter
+    # pre-dispatch UTF-8 admission path.  Its absence preserves Phase 9's
+    # context-capacity reservation semantics and frozen artifact hashes.
+    phase11_input_admission_enabled = bool(
+        values.get("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
+    )
+    phase11_web_evidence_contract_enabled = (
+        phase11_input_admission_enabled and enable_web_tools
+    )
+    roles = ("agent", "planning", "verification")
+    if require_phase10_roles:
+        roles = ("agent", "planning", "claim_extraction", "verification")
+    for role in roles:
         model_id = required(f"RESEARCHOS_DEEPSEEK_{role.upper()}_MODEL")
-        thinking_mode = required(
-            f"RESEARCHOS_DEEPSEEK_{role.upper()}_THINKING_MODE"
-        )
+        thinking_mode = required(f"RESEARCHOS_DEEPSEEK_{role.upper()}_THINKING_MODE")
         policy_overrides: dict[str, object] = {
             "max_input_tokens": int(required("RESEARCHOS_MAX_INPUT_TOKENS")),
             "max_output_tokens": int(required("RESEARCHOS_MAX_OUTPUT_TOKENS")),
@@ -111,9 +131,7 @@ def load_real_integration_settings(
             "max_cost_microunits_per_call": int(
                 required("RESEARCHOS_MAX_COST_MICROUNITS_PER_CALL")
             ),
-            "pricing_policy_version": required(
-                "RESEARCHOS_PRICING_POLICY_VERSION"
-            ),
+            "pricing_policy_version": required("RESEARCHOS_PRICING_POLICY_VERSION"),
             "input_cost_upper_bound_microunits_per_million_tokens": int(
                 required("RESEARCHOS_INPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS")
             ),
@@ -121,6 +139,10 @@ def load_real_integration_settings(
                 required("RESEARCHOS_OUTPUT_COST_UPPER_BOUND_PER_MILLION_TOKENS")
             ),
         }
+        if phase11_input_admission_enabled:
+            policy_overrides["input_reservation_basis"] = (
+                "enforced_utf8_input_limit_v1"
+            )
         if thinking_mode == "disabled":
             policy_overrides.update(
                 temperature=required("RESEARCHOS_TEMPERATURE"),
@@ -129,6 +151,17 @@ def load_real_integration_settings(
         if role == "agent" and enable_agent_tool_calls:
             policy_overrides["provider_total_call_timeout_ms"] = int(
                 required("RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS")
+            )
+        if role == "claim_extraction" and require_phase10_roles:
+            policy_overrides["provider_total_call_timeout_ms"] = int(
+                required("RESEARCHOS_PROVIDER_TOTAL_CALL_TIMEOUT_MS")
+            )
+        phase11_planning_total_timeout_enabled = role == "planning" and bool(
+            values.get("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
+        )
+        if phase11_planning_total_timeout_enabled:
+            policy_overrides["provider_total_call_timeout_ms"] = int(
+                required("RESEARCHOS_PHASE11_PLANNING_TOTAL_CALL_TIMEOUT_MS")
             )
         policy = default_deepseek_policy(
             model_id=model_id,
@@ -150,23 +183,34 @@ def load_real_integration_settings(
                 prompt_content_hash=deepseek_prompt_content_hash(
                     role,
                     enable_web_tools=(role == "agent" and enable_web_tools),
-                    enable_retrieval_tools=(
-                        role == "agent" and enable_retrieval_tools
+                    enable_retrieval_tools=(role == "agent" and enable_retrieval_tools),
+                    web_search_max_results=(
+                        web_search_max_results if role == "agent" else None
+                    ),
+                    require_explicit_web_search_capability=(
+                        phase11_planning_total_timeout_enabled
+                    ),
+                    require_evidence_gap_for_web_search=(
+                        role == "agent" and phase11_web_evidence_contract_enabled
                     ),
                 ),
                 response_contract_version=deepseek_response_contract(
                     role,
                     enable_web_tools=(role == "agent" and enable_web_tools),
-                    enable_retrieval_tools=(
-                        role == "agent" and enable_retrieval_tools
+                    enable_retrieval_tools=(role == "agent" and enable_retrieval_tools),
+                    require_evidence_gap_for_web_search=(
+                        role == "agent" and phase11_web_evidence_contract_enabled
                     ),
                 ),
                 policy=policy,
                 credential_slot_id=credential_slot_id,
+                phase11_planning_total_timeout_enabled=(
+                    phase11_planning_total_timeout_enabled
+                ),
             )
         )
     return RealIntegrationSettings(
-        models=tuple(models),
+        models=tuple(sorted(models, key=lambda item: item.role_id)),
         capabilities=tuple(item.pin() for item in capability_settings),
         capability_settings=capability_settings,
     )

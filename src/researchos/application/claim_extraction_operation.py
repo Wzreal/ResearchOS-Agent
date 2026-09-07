@@ -59,6 +59,7 @@ class ClaimExtractionOperationManager:
         usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN,
         mutation_keys: tuple[str, ...] | None = None,
         failure_code: str | None = None,
+        provider_diagnostics: dict[str, object] | None = None,
     ) -> ClaimExtractionOperation:
         if status not in _LEGAL[operation.status]:
             raise CorruptClaimExtractionOperation("illegal claim extraction transition")
@@ -84,6 +85,11 @@ class ClaimExtractionOperationManager:
                     else mutation_keys
                 ),
                 "failure_code": failure_code,
+                "provider_diagnostics": (
+                    provider_diagnostics
+                    if provider_diagnostics is not None
+                    else operation.provider_diagnostics
+                ),
                 "updated_at": self._clock.now(),
             }
         )

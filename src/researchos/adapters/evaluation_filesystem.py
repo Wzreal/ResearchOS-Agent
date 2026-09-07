@@ -54,7 +54,9 @@ class FilesystemEvaluationArtifactStore:
             validate_evaluation_hashes(result)
             for case in result.cases:
                 case_path = self._case_path(directory, case)
-                persisted = type(case).model_validate_json(case_path.read_bytes())
+                persisted = type(case).model_validate_json(
+                    _native_path(case_path).read_bytes()
+                )
                 if persisted != case:
                     raise ValueError("case artifact differs from authority")
         except (

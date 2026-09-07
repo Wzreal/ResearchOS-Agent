@@ -1,5 +1,28 @@
 # ResearchOS Operator Runbook
 
+## Phase 11 protected REAL benchmark
+
+Do not use this in CI or ordinary development. Provide a validated Phase 11
+bundle, exact expected commit, clean approved ref, explicit acknowledgement,
+and explicit approved cost (USD 50 is a ceiling, not authorization):
+
+```shell
+researchos benchmark --phase11-bundle <bundle.json> \
+  --expected-commit-sha <40-hex-sha> --approved-cost-microunits <value> \
+  --acknowledge-real --case-id p11_citation_chain
+```
+
+This command remains the formal operator path, but the portfolio-v1 paid
+validation window is closed: three bounded Planning smokes were attempted and
+no further paid retry is authorized under the bounded portfolio budget. The
+final attempt validated a three-task planner DAG but stopped before Agent or
+tool dispatch due to a fixture-keyed execution-policy/dynamic-task-ID mismatch;
+the fix is regression-tested offline only. Do not represent this history as a
+complete REAL benchmark case, Tavily search, evidence pipeline, claim
+extraction, verification, or 12-case result. Record unavailable cost/latency
+as unavailable. Use one review per output, then a blinded second review for
+the stratified 50% subset and adjudicate.
+
 This runbook is for the implemented Phase 9 and Phase 10 profiles. It does not authorize
 manual edits to durable JSON, provider retries, or Run-state guesses.
 

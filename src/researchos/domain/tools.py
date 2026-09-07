@@ -17,6 +17,7 @@ from researchos.domain.contracts import (
     Sha256,
     _require_aware,
 )
+from researchos.domain.provider_diagnostics import validate_tool_diagnostics
 from researchos.domain.runtime import IdempotencyMode, UsageCertainty
 
 TOOL_SCHEMA_VERSION = 1
@@ -300,6 +301,7 @@ class ToolInvocationResult(ContractModel):
     artifacts: tuple[ToolArtifact, ...] = ()
     usage: ToolUsage | None = None
     usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN
+    provider_diagnostics: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def result_is_consistent(self) -> ToolInvocationResult:
@@ -317,3 +319,8 @@ class ToolInvocationResult(ContractModel):
         if not succeeded and self.artifacts:
             raise ValueError("failed tool invocation cannot publish artifacts")
         return self
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_are_json(cls, value: dict[str, Any] | None):
+        return validate_tool_diagnostics(value)

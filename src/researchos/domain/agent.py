@@ -108,11 +108,30 @@ class AgentContext(ContractModel):
         return self
 
 
+class AgentToolCallBudget(ContractModel):
+    """Read-only runtime projection of the AgentRunner tool-call authority."""
+
+    tool_calls_used: int = Field(ge=0)
+    max_tool_calls: int = Field(ge=0)
+    remaining_tool_calls: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def remaining_is_exact(self) -> AgentToolCallBudget:
+        if self.tool_calls_used > self.max_tool_calls:
+            raise ValueError("Agent tool calls used exceed the hard limit")
+        if self.remaining_tool_calls != self.max_tool_calls - self.tool_calls_used:
+            raise ValueError("Agent remaining tool calls differ from the hard limit")
+        return self
+
+
 class AgentRequest(ContractModel):
     request_id: SafeId
     context: AgentContext
     agent_step: int = Field(ge=1)
     observations: tuple[AgentObservation, ...] = ()
+    # Phase 11 opt-in runtime projection only. AgentRunner remains the sole
+    # authority that admits or rejects tool calls.
+    tool_call_budget: AgentToolCallBudget | None = None
 
 
 class _AgentDecisionUsage(ContractModel):

@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from researchos.domain.contracts import ContractModel, SafeId, _require_aware
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 
 PLANNING_SCHEMA_VERSION = 1
 VALIDATOR_VERSION = "dag-validator-v1"
@@ -135,6 +136,9 @@ class PlanningPolicy(ContractModel):
     max_tasks: int = Field(gt=0)
     max_graph_depth: int = Field(gt=0)
     max_dependencies_per_task: int = Field(ge=0)
+    # Phase 11 REAL can opt into an explicit declaration rule without changing
+    # historical planning-policy semantics.
+    require_explicit_web_search_capability: bool = False
 
 
 class PlannerMetadata(ContractModel):
@@ -179,6 +183,8 @@ class ValidationIssueCode(StrEnum):
     DUPLICATE_CAPABILITY = "duplicate_capability"
     INVALID_CAPABILITY_ID = "invalid_capability_id"
     UNAUTHORIZED_CAPABILITY = "unauthorized_capability"
+    MISSING_REQUIRED_CAPABILITY = "missing_required_capability"
+    BROWSER_TASK_REQUIRES_LOCAL_URL = "browser_task_requires_local_url"
     TASK_LIMIT_EXCEEDED = "task_limit_exceeded"
     DEPENDENCY_LIMIT_EXCEEDED = "dependency_limit_exceeded"
     DEPTH_LIMIT_EXCEEDED = "depth_limit_exceeded"
@@ -186,6 +192,7 @@ class ValidationIssueCode(StrEnum):
     BUDGET_TOKENS_EXCEEDED = "budget_tokens_exceeded"
     BUDGET_COST_EXCEEDED = "budget_cost_exceeded"
     BUDGET_TOOL_CALLS_EXCEEDED = "budget_tool_calls_exceeded"
+    TASK_TOOL_CALL_LIMIT_EXCEEDED = "task_tool_call_limit_exceeded"
 
 
 class ValidationIssue(ContractModel):
@@ -321,6 +328,9 @@ class PlanningRequest(ContractModel):
     allowed_capability_ids: tuple[SafeId, ...]
     remaining_budget: RemainingBudget
     policy: PlanningPolicy
+    # Optional Phase 11 composition input. Legacy planners retain their prior
+    # semantics when this constraint is absent.
+    per_task_tool_call_limit: int | None = Field(default=None, ge=1)
     replan_count: int = Field(default=0, ge=0)
     reason_code: SafeId | None = None
     reason: Annotated[str, StringConstraints(min_length=1, max_length=1_000)] | None = (
@@ -343,6 +353,7 @@ class PlanningModelResponse(ContractModel):
     response_version: Literal[1] = 1
     planning_model_id: SafeId
     payload: dict[str, Any]
+    provider_diagnostics: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @field_validator("payload")
     @classmethod
@@ -352,6 +363,11 @@ class PlanningModelResponse(ContractModel):
         except (TypeError, ValueError) as exc:
             raise ValueError("planning payload must be finite JSON") from exc
         return value
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_must_be_json(cls, value: dict[str, Any] | None):
+        return validate_provider_diagnostics(value)
 
 
 class PlanningStatus(StrEnum):

@@ -7,7 +7,13 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    Field,
+    StringConstraints,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from researchos.domain.contracts import (
     ContractModel,
@@ -216,6 +222,9 @@ class ModelCallPolicySnapshot(ContractModel):
     provider_request_policy: DeepSeekRequestPolicySnapshot
     pricing_safety_profile: DeepSeekPricingUpperBoundProfile
     provider_call_reservation: ProviderCallReservation
+    input_reservation_basis: Literal[
+        "provider_context_window_v1", "enforced_utf8_input_limit_v1"
+    ] = "provider_context_window_v1"
     max_input_tokens: int = Field(gt=0, le=10_000_000)
     max_output_tokens: int = Field(gt=0, le=1_000_000)
     max_request_bytes: int = Field(gt=0, le=64 * 1024 * 1024)
@@ -254,6 +263,15 @@ class ModelCallPolicySnapshot(ContractModel):
         if value is None:
             return None
         return _validate_decimal(value, minimum=Decimal("0"), maximum=Decimal("1"))
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        """Omit the Phase 11 declaration from legacy Phase 9 wire forms."""
+
+        payload = handler(self)
+        if self.input_reservation_basis == "provider_context_window_v1":
+            payload.pop("input_reservation_basis", None)
+        return payload
 
     @model_validator(mode="after")
     def identity_is_valid(self) -> ModelCallPolicySnapshot:
@@ -312,20 +330,22 @@ class ModelCallPolicySnapshot(ContractModel):
             > self.pricing_safety_profile.provider_max_output_tokens
         ):
             raise ValueError("output cap exceeds provider model limit")
+        reserved_input_tokens = (
+            self.max_input_tokens
+            if self.input_reservation_basis == "enforced_utf8_input_limit_v1"
+            else self.pricing_safety_profile.context_window_tokens
+        )
         reserved_cost = (
-            self.pricing_safety_profile.context_window_tokens
+            reserved_input_tokens
             * self.input_cost_upper_bound_microunits_per_million_tokens
             + self.max_output_tokens
             * self.output_cost_upper_bound_microunits_per_million_tokens
             + 999_999
         ) // 1_000_000
         expected_reservation = ProviderCallReservation(
-            input_tokens=self.pricing_safety_profile.context_window_tokens,
+            input_tokens=reserved_input_tokens,
             output_tokens=self.max_output_tokens,
-            total_tokens=(
-                self.pricing_safety_profile.context_window_tokens
-                + self.max_output_tokens
-            ),
+            total_tokens=reserved_input_tokens + self.max_output_tokens,
             cost_microunits=reserved_cost,
             cost_currency=self.cost_currency,
         )
@@ -342,6 +362,10 @@ class ModelCallPolicySnapshot(ContractModel):
         if self.provider_total_call_timeout_ms is None:
             # Preserve the Phase 9A direct-profile hash preimage.
             excluded.add("provider_total_call_timeout_ms")
+        if self.input_reservation_basis == "provider_context_window_v1":
+            # Existing Phase 9 snapshots did not carry this Phase 11-only
+            # admission declaration.  Keep their canonical hash preimage.
+            excluded.add("input_reservation_basis")
         return self.model_dump(mode="json", exclude=excluded)
 
     def compute_hash(self) -> str:
@@ -379,15 +403,21 @@ class ModelCallPolicySnapshot(ContractModel):
             output_rate = int(
                 values["output_cost_upper_bound_microunits_per_million_tokens"]
             )
+            reservation_input_tokens = (
+                int(values["max_input_tokens"])
+                if values.get("input_reservation_basis")
+                == "enforced_utf8_input_limit_v1"
+                else profile.context_window_tokens
+            )
             reserved_cost = (
-                profile.context_window_tokens * input_rate
+                reservation_input_tokens * input_rate
                 + output_tokens * output_rate
                 + 999_999
             ) // 1_000_000
             values["provider_call_reservation"] = ProviderCallReservation(
-                input_tokens=profile.context_window_tokens,
+                input_tokens=reservation_input_tokens,
                 output_tokens=output_tokens,
-                total_tokens=profile.context_window_tokens + output_tokens,
+                total_tokens=reservation_input_tokens + output_tokens,
                 cost_microunits=reserved_cost,
                 cost_currency=str(values["cost_currency"]),
             )

@@ -28,6 +28,7 @@ from researchos.domain.agent import (
     AgentExecutionStatus,
     AgentObservation,
     AgentRequest,
+    AgentToolCallBudget,
 )
 from researchos.domain.contracts import (
     TraceEvent,
@@ -35,6 +36,8 @@ from researchos.domain.contracts import (
     canonical_json_bytes,
     model_sha256,
 )
+from researchos.domain.identity import sha256_text
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.real_composition import ProviderSuboperationReservation
 from researchos.domain.real_tools import (
     AuthorizedToolDispatchEnvelope,
@@ -47,6 +50,9 @@ from researchos.domain.runtime import (
 )
 from researchos.domain.tools import (
     AdapterMode,
+    BrowserResult,
+    SearchContentKind,
+    SearchResultV2,
     ToolInvocationRequest,
     ToolInvocationResult,
     ToolInvocationStatus,
@@ -77,6 +83,12 @@ class AgentRunnerPolicy(BaseModel):
     max_tool_calls: int = Field(ge=0)
     max_observation_bytes: int = Field(default=1_000_000, ge=1)
     trace_failure_retryable: bool = True
+    # Phase 11 REAL opt-in: search metadata can discover a source but cannot
+    # complete a task that explicitly requires a browser-fetched source body.
+    require_source_evidence_before_final: bool = False
+    # Phase 11 REAL opt-in: disclose the existing hard tool-call authority to
+    # the model as read-only request state before every decision.
+    expose_tool_call_budget: bool = False
 
 
 class _UsageAccumulator:
@@ -212,6 +224,17 @@ class AgentRunner:
                 context=context,
                 agent_step=step,
                 observations=tuple(observations),
+                tool_call_budget=(
+                    AgentToolCallBudget(
+                        tool_calls_used=usage.amount.tool_calls,
+                        max_tool_calls=effective_tool_limit,
+                        remaining_tool_calls=(
+                            effective_tool_limit - usage.amount.tool_calls
+                        ),
+                    )
+                    if self._policy.expose_tool_call_budget
+                    else None
+                ),
             )
             outcome, value = await self._await_bounded(
                 self._agent.decide(request, cancellation),
@@ -275,7 +298,22 @@ class AgentRunner:
                     TraceEventType.AGENT_DECISION,
                     correlation_id=context.attempt_id,
                     causation_id=previous_event.event_id,
-                    attributes={"agent_step": step, "kind": decision.kind.value},
+                    attributes={
+                        "agent_step": step,
+                        "kind": decision.kind.value,
+                        "provider_diagnostics_v1": self._provider_diagnostics(
+                            request.request_id
+                        ),
+                        **(
+                            {
+                                "tool_call_budget": request.tool_call_budget.model_dump(
+                                    mode="json"
+                                )
+                            }
+                            if request.tool_call_budget is not None
+                            else {}
+                        ),
+                    },
                 )
             except AgentTraceError:
                 return self._failure(
@@ -289,6 +327,16 @@ class AgentRunner:
                 )
 
             if decision.kind is AgentDecisionKind.FINAL:
+                if (
+                    self._policy.require_source_evidence_before_final
+                    and "web_browser" in context.authorized_capability_ids
+                    and not self._has_source_evidence(observations)
+                ):
+                    return self._failure(
+                        "agent_source_evidence_required",
+                        "browser-authorized task finalized without source evidence",
+                        usage,
+                    )
                 try:
                     self._emit(
                         context,
@@ -641,6 +689,21 @@ class AgentRunner:
                         "status": result.status.value,
                         "usage_certainty": result.usage_certainty.value,
                         "artifact_ids": [item.artifact_id for item in result.artifacts],
+                        "tool_diagnostics_v1": result.provider_diagnostics,
+                        "failure_code": (
+                            result.error.code if result.error is not None else None
+                        ),
+                        "retryable": (
+                            result.error.retryable
+                            if result.error is not None
+                            else False
+                        ),
+                        "result_count": (
+                            len(result.output.hits)
+                            if result.output is not None
+                            and hasattr(result.output, "hits")
+                            else None
+                        ),
                     },
                 )
             except AgentTraceError:
@@ -768,6 +831,25 @@ class AgentRunner:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
             raise
+
+    @staticmethod
+    def _has_source_evidence(observations: list[AgentObservation]) -> bool:
+        """Return whether current-task observations contain admissible source data."""
+
+        for observation in observations:
+            result = observation.result
+            if result.status is not ToolInvocationStatus.SUCCEEDED:
+                continue
+            output = result.output
+            if isinstance(output, BrowserResult):
+                if output.content_hash == sha256_text(output.content):
+                    return True
+            elif isinstance(output, SearchResultV2) and any(
+                hit.content_kind is SearchContentKind.SOURCE_EXCERPT
+                for hit in output.hits
+            ):
+                return True
+        return False
 
     def _precondition_failure(self, context, cancellation, usage):
         if cancellation.cancelled:
@@ -898,6 +980,12 @@ class AgentRunner:
                 correlation_id=context.attempt_id,
                 attributes={"agent_step": step, "tool_call_id": tool_call_id},
             )
+
+    def _provider_diagnostics(self, request_id: str) -> dict[str, object] | None:
+        method = getattr(self._agent, "provider_diagnostics_for", None)
+        if not callable(method):
+            return None
+        return validate_provider_diagnostics(method(request_id))
 
     @staticmethod
     def _tool_attributes(invocation, descriptor):

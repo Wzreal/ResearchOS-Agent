@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
 from researchos.domain.claims import ClaimEvidenceRelation
 from researchos.domain.contracts import ContractModel, SafeId, Sha256, _require_aware
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 
 CLAIM_EXTRACTION_SCHEMA_VERSION = 1
@@ -118,6 +119,7 @@ class ClaimExtractionModelResult(ContractModel):
     response: ClaimExtractionResponse
     usage: RuntimeResourceAmount | None = None
     usage_certainty: UsageCertainty = UsageCertainty.UNKNOWN
+    provider_diagnostics: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def usage_matches_certainty(self) -> ClaimExtractionModelResult:
@@ -126,3 +128,8 @@ class ClaimExtractionModelResult(ContractModel):
         if self.usage_certainty is not UsageCertainty.UNKNOWN and self.usage is None:
             raise ValueError("known usage certainty requires an amount")
         return self
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_must_be_json(cls, value: dict[str, Any] | None):
+        return validate_provider_diagnostics(value)

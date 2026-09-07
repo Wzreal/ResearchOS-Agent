@@ -19,9 +19,11 @@ from researchos.configuration.real_settings import canonicalize_base_endpoint
 from researchos.configuration.validation import (
     PHASE9B_AGENT_RESPONSE_CONTRACT,
     PHASE9C_AGENT_RESPONSE_CONTRACT,
+    PHASE11_AGENT_RESPONSE_CONTRACT,
     Phase9ARealAgentDecision,
     Phase9BRealAgentDecision,
     Phase9CRealAgentDecision,
+    Phase11RealAgentDecision,
     deepseek_prompt_content_hash,
     deepseek_response_contract,
     deepseek_system_prompt,
@@ -32,6 +34,7 @@ from researchos.domain.agent import (
     AgentError,
     AgentFailedDecision,
     AgentRequest,
+    AgentToolDecision,
 )
 from researchos.domain.claim_extraction import (
     ClaimExtractionModelResult,
@@ -39,12 +42,16 @@ from researchos.domain.claim_extraction import (
     ClaimExtractionResponse,
 )
 from researchos.domain.planning import PlanningModelResponse, PlanningRequest
+from researchos.domain.provider_diagnostics import (
+    AgentResponseValidationDiagnosticsV1,
+    AgentResponseValidationErrorV1,
+)
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 from researchos.domain.synthesis import (
     VerificationModelRequest,
     VerificationModelResponse,
 )
-from researchos.domain.tools import AdapterMode
+from researchos.domain.tools import AdapterMode, SearchRequest
 from researchos.interfaces.providers import (
     ProviderAdmissionProfile,
     ProviderDispatchAuthorizer,
@@ -52,7 +59,12 @@ from researchos.interfaces.providers import (
 from researchos.interfaces.runtime import CancellationSignal
 
 
-def _validate_binding(bound: BoundRealModel, role_id: str) -> None:
+def _validate_binding(
+    bound: BoundRealModel,
+    role_id: str,
+    *,
+    web_search_max_results: int | None = None,
+) -> None:
     settings = bound.settings
     if settings.provider_id != "deepseek" or settings.role_id != role_id:
         raise RunConfigurationError("DeepSeek adapter binding role/provider differs")
@@ -60,18 +72,33 @@ def _validate_binding(bound: BoundRealModel, role_id: str) -> None:
         raise RunConfigurationError("DeepSeek base endpoint must use HTTPS")
     web_tools = (
         role_id == "agent"
-        and settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
+        and settings.response_contract_version
+        in {PHASE9B_AGENT_RESPONSE_CONTRACT, PHASE11_AGENT_RESPONSE_CONTRACT}
     )
     retrieval_tools = (
         role_id == "agent"
         and settings.response_contract_version == PHASE9C_AGENT_RESPONSE_CONTRACT
     )
     if settings.prompt_content_hash != deepseek_prompt_content_hash(
-        role_id, enable_web_tools=web_tools, enable_retrieval_tools=retrieval_tools
+        role_id,
+        enable_web_tools=web_tools,
+        enable_retrieval_tools=retrieval_tools,
+        require_evidence_gap_for_web_search=(
+            settings.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
+        ),
+        web_search_max_results=web_search_max_results,
+        require_explicit_web_search_capability=(
+            settings.phase11_planning_total_timeout_enabled
+        ),
     ):
         raise RunConfigurationError("DeepSeek prompt content hash differs")
     if settings.response_contract_version != deepseek_response_contract(
-        role_id, enable_web_tools=web_tools, enable_retrieval_tools=retrieval_tools
+        role_id,
+        enable_web_tools=web_tools,
+        enable_retrieval_tools=retrieval_tools,
+        require_evidence_gap_for_web_search=(
+            settings.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
+        ),
     ):
         raise RunConfigurationError("DeepSeek response contract differs")
 
@@ -82,22 +109,50 @@ def _messages(
     *,
     enable_web_tools: bool = False,
     enable_retrieval_tools: bool = False,
+    web_search_max_results: int | None = None,
+    planning_model_id: str | None = None,
+    require_explicit_web_search_capability: bool = False,
+    require_evidence_gap_for_web_search: bool = False,
 ) -> tuple[dict[str, str], ...]:
+    payload = request.model_dump(mode="json")
+    # Preserve Phase 1-10 planning request bytes when the Phase 11-only
+    # per-task limit is not selected.
+    if role_id == "planning" and payload.get("per_task_tool_call_limit") is None:
+        payload.pop("per_task_tool_call_limit", None)
+    # Preserve Phase 1-10 Agent request bytes unless Phase 11 runtime selected
+    # the explicit tool-budget projection.
+    if role_id == "agent" and payload.get("tool_call_budget") is None:
+        payload.pop("tool_call_budget", None)
     content = json.dumps(
-        request.model_dump(mode="json"),
+        payload,
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
         separators=(",", ":"),
     )
+    system_content = deepseek_system_prompt(
+        role_id,
+        enable_web_tools=enable_web_tools,
+        enable_retrieval_tools=enable_retrieval_tools,
+        web_search_max_results=web_search_max_results,
+        require_explicit_web_search_capability=(
+            require_explicit_web_search_capability
+        ),
+        require_evidence_gap_for_web_search=(
+            require_evidence_gap_for_web_search
+        ),
+    )
+    if planning_model_id is not None:
+        if role_id != "planning":
+            raise ValueError("planning model ID is valid only for planning")
+        system_content += (
+            "\nSet planner_metadata.planning_model_id exactly to: "
+            f"{planning_model_id}"
+        )
     return (
         {
             "role": "system",
-            "content": deepseek_system_prompt(
-                role_id,
-                enable_web_tools=enable_web_tools,
-                enable_retrieval_tools=enable_retrieval_tools,
-            ),
+            "content": system_content,
         },
         {"role": "user", "content": content},
     )
@@ -134,13 +189,24 @@ class DeepSeekPlanningModel:
         )
         failure: PlanningModelFailure | None = None
         try:
-            response = self._transport.complete(_messages("planning", request))
+            response = self._transport.complete(
+                _messages(
+                    "planning",
+                    request,
+                    planning_model_id=self._bound.settings.model_id,
+                    require_explicit_web_search_capability=(
+                        self._bound.settings.phase11_planning_total_timeout_enabled
+                    ),
+                ),
+                operation_id=request.request_id,
+            )
             payload = json.loads(response.content)
             if not isinstance(payload, dict):
                 raise ValueError
             return PlanningModelResponse(
                 planning_model_id=self._bound.settings.model_id,
                 payload=payload,
+                provider_diagnostics=response.provider_diagnostics,
             )
         except RealProviderFailure as exc:
             failure = PlanningModelFailure(
@@ -149,6 +215,7 @@ class DeepSeekPlanningModel:
                 retryable=exc.retryable,
                 usage=exc.usage,
                 usage_certainty=exc.usage_certainty,
+                provider_diagnostics=exc.provider_diagnostics,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             failure = PlanningModelFailure(
@@ -212,7 +279,9 @@ class DeepSeekClaimExtractionModel:
                 "claim extraction provider reservation exceeds workflow budget slice",
             )
         try:
-            response = self._transport.complete(_messages("claim_extraction", request))
+            response = self._transport.complete(
+                _messages("claim_extraction", request), operation_id=request.request_id
+            )
             payload = json.loads(response.content)
             if not isinstance(payload, dict):
                 raise ValueError
@@ -220,6 +289,7 @@ class DeepSeekClaimExtractionModel:
                 response=ClaimExtractionResponse.model_validate(payload),
                 usage=response.usage,
                 usage_certainty=response.usage_certainty,
+                provider_diagnostics=response.provider_diagnostics,
             )
         except RealProviderFailure as exc:
             raise PlanningModelFailure(
@@ -228,6 +298,7 @@ class DeepSeekClaimExtractionModel:
                 retryable=exc.retryable,
                 usage=exc.usage,
                 usage_certainty=exc.usage_certainty,
+                provider_diagnostics=exc.provider_diagnostics,
             ) from exc
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise PlanningModelFailure(
@@ -237,29 +308,133 @@ class DeepSeekClaimExtractionModel:
             ) from exc
 
 
+class _AgentResponseValidationError(ValueError):
+    def __init__(self, rule: str) -> None:
+        super().__init__(rule)
+        self.rule = rule
+
+
+_SAFE_AGENT_VALIDATION_LOC_SEGMENTS = frozenset(
+    {
+        "kind",
+        "tool_call",
+        "final",
+        "error",
+        "usage",
+        "usage_certainty",
+        "evidence_status",
+        "remaining_evidence_gap",
+        "tool_call_id",
+        "capability_id",
+        "input",
+        "input_type",
+        "query",
+        "url",
+        "limit",
+        "outputs",
+        "output_id",
+        "media_type",
+        "artifact_ids",
+        "value_hash",
+        "code",
+        "message",
+    }
+)
+_AGENT_VALIDATION_BRANCHES = frozenset({"tool_call", "final", "error"})
+
+
+def _safe_agent_response_validation(
+    exc: ValidationError | ValueError,
+) -> dict[str, object]:
+    """Return bounded diagnostics without retaining provider-supplied content."""
+
+    if not isinstance(exc, ValidationError):
+        return AgentResponseValidationDiagnosticsV1(
+            errors=(
+                AgentResponseValidationErrorV1(
+                    category="invalid", branch="decision", loc=("decision",)
+                ),
+            )
+        ).model_dump(mode="json")
+
+    diagnostics: list[AgentResponseValidationErrorV1] = []
+    errors = exc.errors(
+        include_context=False, include_input=False, include_url=False
+    )
+    for error in errors[:3]:
+        error_type = str(error["type"])
+        category = (
+            "missing"
+            if error_type == "missing"
+            else "enum"
+            if error_type in {"enum", "literal_error"}
+            else "extra"
+            if error_type == "extra_forbidden"
+            else "type"
+            if "type" in error_type or error_type.endswith("_parsing")
+            else "invalid"
+        )
+        parts = tuple(
+            str(part)
+            for part in error["loc"]
+            if isinstance(part, str) and part in _SAFE_AGENT_VALIDATION_LOC_SEGMENTS
+        )
+        branch = next(
+            (part for part in parts if part in _AGENT_VALIDATION_BRANCHES),
+            "decision",
+        )
+        diagnostics.append(
+            AgentResponseValidationErrorV1(
+                category=category,
+                branch="failed" if branch == "error" else branch,
+                loc=parts or ("decision",),
+            )
+        )
+    return AgentResponseValidationDiagnosticsV1(
+        errors=tuple(diagnostics)
+        or (
+            AgentResponseValidationErrorV1(
+                category="invalid", branch="decision", loc=("decision",)
+            ),
+        )
+    ).model_dump(mode="json")
+
+
 class DeepSeekAgent:
     def __init__(
         self,
         bound: BoundRealModel,
         transport: OpenAICompatibleChatTransport,
         authorizer: ProviderDispatchAuthorizer,
+        *,
+        web_search_max_results: int | None = None,
     ) -> None:
-        _validate_binding(bound, "agent")
+        _validate_binding(
+            bound, "agent", web_search_max_results=web_search_max_results
+        )
         self._bound = bound
         self._transport = transport
         self._authorizer = authorizer
         self._web_tools = (
-            bound.settings.response_contract_version == PHASE9B_AGENT_RESPONSE_CONTRACT
+            bound.settings.response_contract_version
+            in {PHASE9B_AGENT_RESPONSE_CONTRACT, PHASE11_AGENT_RESPONSE_CONTRACT}
+        )
+        self._phase11_evidence_gap_contract = (
+            bound.settings.response_contract_version == PHASE11_AGENT_RESPONSE_CONTRACT
         )
         self._retrieval_tools = (
             bound.settings.response_contract_version == PHASE9C_AGENT_RESPONSE_CONTRACT
         )
+        if web_search_max_results is not None and not 1 <= web_search_max_results <= 20:
+            raise ValueError("REAL web search maximum results is invalid")
+        self._web_search_max_results = web_search_max_results
         self._descriptor = AgentDescriptor(
             agent_id="deepseek_agent",
             adapter_id=bound.settings.adapter_id,
             mode=AdapterMode.REAL,
             operation_version=bound.settings.adapter_version,
         )
+        self._provider_diagnostics_by_request: dict[str, dict[str, object]] = {}
 
     async def aclose(self) -> None:
         await self._transport.aclose()
@@ -279,6 +454,9 @@ class DeepSeekAgent:
             if self._web_tools or self._retrieval_tools
             else ProviderAdmissionProfile.LEGACY_TASK_LIMIT_V1
         )
+
+    def provider_diagnostics_for(self, request_id: str) -> dict[str, object] | None:
+        return self._provider_diagnostics_by_request.get(request_id)
 
     async def decide(
         self, request: AgentRequest, cancellation: CancellationSignal
@@ -313,11 +491,19 @@ class DeepSeekAgent:
                     request,
                     enable_web_tools=self._web_tools,
                     enable_retrieval_tools=self._retrieval_tools,
+                    web_search_max_results=self._web_search_max_results,
+                    require_evidence_gap_for_web_search=(
+                        self._phase11_evidence_gap_contract
+                    ),
                 ),
                 cancellation=cancellation,
                 deadline=request.context.deadline,
+                operation_id=request.request_id,
             )
         except RealProviderFailure as exc:
+            self._provider_diagnostics_by_request[request.request_id] = (
+                exc.provider_diagnostics or {}
+            )
             return AgentFailedDecision(
                 error=AgentError(
                     code=exc.code,
@@ -336,17 +522,58 @@ class DeepSeekAgent:
             contract = (
                 Phase9CRealAgentDecision
                 if self._retrieval_tools
+                else Phase11RealAgentDecision
+                if self._phase11_evidence_gap_contract
                 else Phase9BRealAgentDecision
                 if self._web_tools
                 else Phase9ARealAgentDecision
             )
-            return TypeAdapter(contract).validate_python(payload)
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            ValueError,
-            ValidationError,
-        ):
+            self._provider_diagnostics_by_request[request.request_id] = (
+                response.provider_diagnostics
+            )
+            decision = TypeAdapter(contract).validate_python(payload)
+            if (
+                self._web_search_max_results is not None
+                and isinstance(decision, AgentToolDecision)
+                and isinstance(decision.tool_call.input, SearchRequest)
+                and decision.tool_call.input.limit > self._web_search_max_results
+            ):
+                raise _AgentResponseValidationError("web_search_limit_exceeded")
+            return decision
+        except _AgentResponseValidationError as exc:
+            self._provider_diagnostics_by_request[request.request_id] = {
+                **response.provider_diagnostics,
+                "error_code": exc.rule,
+            }
+            return AgentFailedDecision(
+                error=AgentError(
+                    code="provider_response_invalid",
+                    message="DeepSeek Agent response is invalid",
+                    retryable=False,
+                ),
+                usage=response.usage,
+                usage_certainty=response.usage_certainty,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._provider_diagnostics_by_request[request.request_id] = {
+                **response.provider_diagnostics,
+                "error_code": "agent_response_json_invalid",
+            }
+            return AgentFailedDecision(
+                error=AgentError(
+                    code="provider_response_invalid",
+                    message="DeepSeek Agent response is invalid",
+                    retryable=False,
+                ),
+                usage=response.usage,
+                usage_certainty=response.usage_certainty,
+            )
+        except (ValueError, ValidationError) as exc:
+            self._provider_diagnostics_by_request[request.request_id] = {
+                **response.provider_diagnostics,
+                "error_code": "agent_response_contract_invalid",
+                "agent_response_validation": _safe_agent_response_validation(exc),
+            }
             return AgentFailedDecision(
                 error=AgentError(
                     code="provider_response_invalid",
@@ -386,7 +613,9 @@ class DeepSeekVerificationModel:
             composition_hash=self._bound.composition_hash,
         )
         response = await self._transport.complete_async(
-            _messages("verification", request), cancellation=cancellation
+            _messages("verification", request),
+            cancellation=cancellation,
+            operation_id=request.verification_id,
         )
         return VerificationModelResponse(
             raw_bytes=response.content,
@@ -397,4 +626,5 @@ class DeepSeekVerificationModel:
             role=request.role,
             round_number=request.round_number,
             draft_revision_id=request.draft_revision_id,
+            provider_diagnostics=response.provider_diagnostics,
         )

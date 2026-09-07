@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import heapq
 import json
+import re
 from collections import Counter
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -37,6 +39,8 @@ class DAGValidator:
         candidate: CandidatePlan,
         request: PlanningRequest,
         response_planning_model_id: str,
+        *,
+        per_task_tool_call_limit: int | None = None,
     ) -> ValidationResult:
         issues: list[ValidationIssue] = []
 
@@ -126,6 +130,19 @@ class DAGValidator:
         for task in candidate.tasks:
             task_id = task.task_id
             perspective_usage[task.perspective_id] += 1
+            if (
+                per_task_tool_call_limit is not None
+                and task.estimate.tool_calls > per_task_tool_call_limit
+            ):
+                add(
+                    ValidationIssueCode.TASK_TOOL_CALL_LIMIT_EXCEEDED,
+                    "task estimated Tool calls exceed the per-task limit",
+                    task_id=task_id,
+                    details={
+                        "actual": task.estimate.tool_calls,
+                        "limit": per_task_tool_call_limit,
+                    },
+                )
             if task_counts[task_id] > 1:
                 add(
                     ValidationIssueCode.DUPLICATE_TASK_ID,
@@ -190,6 +207,33 @@ class DAGValidator:
                     reverse_graph[task_id].add(dependency_id)
 
             capability_counts = Counter(task.required_capability_ids)
+            if (
+                request.policy.require_explicit_web_search_capability
+                and re.search(r"\bweb\s+search\b", task.objective, re.IGNORECASE)
+                and "web_search" not in task.required_capability_ids
+            ):
+                add(
+                    ValidationIssueCode.MISSING_REQUIRED_CAPABILITY,
+                    "web-search task must declare web_search capability",
+                    task_id=task_id,
+                    details={"capability_id": "web_search"},
+                )
+            if (
+                request.policy.require_explicit_web_search_capability
+                and "web_browser" in task.required_capability_ids
+                and "web_search" not in task.required_capability_ids
+                and not self._has_explicit_http_url(task.objective)
+            ):
+                add(
+                    ValidationIssueCode.BROWSER_TASK_REQUIRES_LOCAL_URL,
+                    "browser-only task must contain a concrete HTTP(S) source "
+                    "URL in its own objective; upstream task results are not "
+                    "delivered at runtime",
+                    task_id=task_id,
+                    details={
+                        "capability_ids": tuple(sorted(task.required_capability_ids))
+                    },
+                )
             for capability_id in task.required_capability_ids:
                 if capability_counts[capability_id] > 1:
                     add(
@@ -440,6 +484,15 @@ class DAGValidator:
         except ValidationError:
             return False
         return True
+
+    @staticmethod
+    def _has_explicit_http_url(objective: str) -> bool:
+        """True when the objective text itself names an absolute HTTP(S) URL."""
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+", objective):
+            parsed = urlsplit(token.rstrip(".,;:!?)]}>\"'"))
+            if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
+                return True
+        return False
 
     @staticmethod
     def _issue_key(issue: ValidationIssue) -> tuple[str, str, str, str, str]:

@@ -52,6 +52,24 @@ def test_valid_multi_perspective_dag_has_deterministic_metrics_and_order() -> No
     ]
 
 
+def test_phase11_web_search_directive_requires_explicit_capability() -> None:
+    request = planning_request().model_copy(
+        update={
+            "policy": planning_policy().model_copy(
+                update={"require_explicit_web_search_capability": True}
+            ),
+            "allowed_capability_ids": ("search", "web_search"),
+        }
+    )
+    payload = candidate_payload(request)
+    payload["tasks"][0]["objective"] = "Use web search for primary sources"
+    payload["tasks"][0]["required_capability_ids"] = []
+
+    result = validate_payload(payload, request=request)
+
+    assert ValidationIssueCode.MISSING_REQUIRED_CAPABILITY in issue_codes(result)
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected"),
     [

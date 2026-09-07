@@ -1149,3 +1149,43 @@ not silently rewritten. If a decision changes, add a superseding ADR.
   10 evaluation, `structural_selfcheck_v1`, rebuilds a structural-only dataset
   from persisted input and profile through the unchanged Phase 7 harness. It is
   not benchmark, factual, or human quality evidence.
+
+## ADR-0032: Phase 11 reuses existing evaluation and REAL authorities
+
+- **Status:** Accepted
+- **Date:** 2026-09-05
+- **Decision:** Phase 11 adds configuration, deterministic datasets, and
+  read-only projections only. It reuses Phase 7 frozen artifacts and the
+  existing REAL composition/factory boundary; it adds no lifecycle, budget, or
+  measurement authority.
+- **Consequences:** A paid run requires an exact commit, clean tree, approved
+  ref, acknowledgement, explicit cost approval, and the USD 50 hard ceiling.
+  Human, reference, deterministic, and structural evidence remain distinct.
+  The explicit Phase 11 planning-timeout marker also selects a conservative
+  pre-dispatch UTF-8 request-input admission bound for all four Phase 11 model
+  roles. Only that selected policy may reserve the configured input cap;
+  legacy Phase 9 policies retain their provider-context-window reservation and
+  canonical hash preimage. Rejected oversized requests are `NOT_DISPATCHED`.
+
+## ADR-0033: Preserve planner-generated task identities at the policy boundary
+
+- **Status:** Accepted
+- **Date:** 2026-09-06
+- **Context:** The frozen Phase 10/11 execution profile used three uniform
+  fixture-keyed task policies. A bounded Phase 11 REAL Planning smoke returned
+  and validated a three-task DAG whose valid planner-generated IDs differed
+  from those fixture IDs, so strict execution-policy coverage rejected it
+  before Agent or tool dispatch.
+- **Decision:** After existing DAG validation, `WorkflowCoordinator` derives a
+  runtime-only execution-policy configuration by deterministically rebinding
+  the existing policies to validated DAG IDs only when the policy and DAG
+  cardinalities match and every source policy is semantically uniform except
+  for `task_id`. The frozen profile and validated DAG are not mutated.
+  `ExecutionPolicyBuilder` retains its exact-set coverage validation; any
+  cardinality mismatch or non-uniform policy configuration fails closed.
+- **Consequences:** No second policy or budget authority exists, and all
+  scheduling, retry, reservation, and idempotency fields are preserved. The
+  change is offline regression-tested only. The three bounded Planning smokes
+  do not establish completion of a REAL benchmark case, Tavily search,
+  evidence, claim extraction, verification, or the 12-case benchmark; no
+  further paid retries are authorized under the Portfolio-v1 budget.

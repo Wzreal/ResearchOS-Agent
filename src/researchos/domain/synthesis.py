@@ -25,6 +25,7 @@ from researchos.domain.contracts import (
 )
 from researchos.domain.evidence import EvidenceStoreSnapshot
 from researchos.domain.identity import stable_hash, stable_id
+from researchos.domain.provider_diagnostics import validate_provider_diagnostics
 from researchos.domain.runtime import RuntimeResourceAmount, UsageCertainty
 
 SYNTHESIS_SCHEMA_VERSION = 1
@@ -649,3 +650,9 @@ class VerificationModelResponse(ContractModel):
     role: VerificationRole
     round_number: int = Field(ge=0)
     draft_revision_id: SafeId
+    provider_diagnostics: dict[str, object] | None = Field(default=None, exclude=True)
+
+    @field_validator("provider_diagnostics")
+    @classmethod
+    def provider_diagnostics_must_be_safe(cls, value: dict[str, object] | None):
+        return validate_provider_diagnostics(value)

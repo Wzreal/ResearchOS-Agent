@@ -7,6 +7,7 @@ from collections.abc import Callable
 from researchos.application.async_dag_executor import AsyncDAGExecutor
 from researchos.application.claim_extractor import ClaimExtractor
 from researchos.application.durable_verification import DurableVerificationCoordinator
+from researchos.application.errors import EvidenceStoreNotFound
 from researchos.application.execution_policy_builder import ExecutionPolicyBuilder
 from researchos.application.perspective_planner import PerspectivePlanner
 from researchos.application.run_manager import RunManager
@@ -15,7 +16,9 @@ from researchos.application.workflow_evaluation import structural_selfcheck_requ
 from researchos.application.workflow_handoff import WorkflowHandoffManager
 from researchos.domain.claim_extraction_operation import ClaimExtractionOperationStatus
 from researchos.domain.contracts import (
+    ErrorCategory,
     RunConfig,
+    RunError,
     RunInput,
     RunState,
     RunStatus,
@@ -23,6 +26,7 @@ from researchos.domain.contracts import (
     model_sha256,
 )
 from researchos.domain.identity import stable_id
+from researchos.domain.planning import TaskDAG
 from researchos.domain.runtime import ExecutorStatus
 from researchos.domain.workflow import Phase10WorkflowProfileV1
 from researchos.interfaces.evidence import EvidenceStore
@@ -53,6 +57,8 @@ class WorkflowCoordinator:
         mock_bundle_version: str | None = None,
         mock_bundle_hash: str | None = None,
         planning_reservation: object | None = None,
+        runtime_binder: Callable[[RunState], None] | None = None,
+        evaluating_rebinder: Callable[[RunState], None] | None = None,
     ) -> None:
         self._runs = runs
         self._planner = planner
@@ -71,6 +77,8 @@ class WorkflowCoordinator:
         self._mock_bundle_version = mock_bundle_version
         self._mock_bundle_hash = mock_bundle_hash
         self._planning_reservation = planning_reservation
+        self._runtime_binder = runtime_binder
+        self._evaluating_rebinder = evaluating_rebinder
 
     async def create_and_execute(
         self, run_input: RunInput, config: RunConfig
@@ -96,6 +104,8 @@ class WorkflowCoordinator:
         # not append RunManager's RESUMED event in the post-publication crash
         # window: evaluating the same request will load the published authority.
         if state.status is RunStatus.EVALUATING:
+            if self._evaluating_rebinder is not None:
+                self._evaluating_rebinder(state)
             return await self.execute(state)
         resumed = self._runs.resume(
             run_id, expected_input=expected_input, expected_config=expected_config
@@ -105,6 +115,8 @@ class WorkflowCoordinator:
     async def execute(self, state: RunState) -> RunState:
         """Advance one Run; no stage cursor is retained on this object."""
         state = self._runs.load(state.run_id)
+        if self._runtime_binder is not None:
+            self._runtime_binder(state)
         if state.status in {
             RunStatus.COMPLETED,
             RunStatus.PARTIAL,
@@ -139,7 +151,16 @@ class WorkflowCoordinator:
                     state.run_id, RunStatus.PARTIAL, reason="execution_partial"
                 )
             state = self._runs.load(state.run_id)
-            if not self._evidence.load(state.run_id).evidence:
+            # An eligible observation creates the store through EvidenceMemory.
+            # Its absence is therefore the normal durable representation of a
+            # successful execution that produced no admissible Evidence, rather
+            # than a persistence failure.  Do not broaden this boundary: corrupt
+            # or otherwise unavailable stores must still fail visibly.
+            try:
+                evidence = self._evidence.load(state.run_id).evidence
+            except EvidenceStoreNotFound:
+                evidence = ()
+            if not evidence:
                 return self._runs.finalize(
                     state.run_id, RunStatus.PARTIAL, reason="no_eligible_evidence"
                 )
@@ -192,9 +213,21 @@ class WorkflowCoordinator:
             # A valid durable handoff is the only recoverable planning outcome.
             try:
                 self._handoffs.create_or_validate_checkpoint(state)
-            except Exception:
+            except Exception as exc:
                 return self._runs.finalize(
-                    state.run_id, RunStatus.FAILED, reason="planning_outcome_unknown"
+                    state.run_id,
+                    RunStatus.FAILED,
+                    reason="planning_outcome_unknown",
+                    errors=(
+                        self._planning_failure_error(
+                            state,
+                            code=getattr(exc, "code", "planning_outcome_unknown"),
+                            message=str(exc),
+                            retryable=False,
+                            category=ErrorCategory.LIFECYCLE,
+                            details={"planning_recovery": "handoff_missing_or_invalid"},
+                        ),
+                    ),
                 )
             return self._runs.load(state.run_id)
         admission = prepare_phase10_planning_admission(
@@ -210,13 +243,45 @@ class WorkflowCoordinator:
             state, self._profile.planning_policy, phase10_planning_admission=admission
         )
         if result.validated_dag is None:
+            planning_error = result.planning_error
             return self._runs.finalize(
-                state.run_id, RunStatus.FAILED, reason="planning_not_validated"
+                state.run_id,
+                RunStatus.FAILED,
+                reason="planning_not_validated",
+                errors=(
+                    self._planning_failure_error(
+                        state,
+                        code=(
+                            planning_error.code
+                            if planning_error is not None
+                            else "planning_not_validated"
+                        ),
+                        message=(
+                            planning_error.message
+                            if planning_error is not None
+                            else "planning did not produce a validated DAG"
+                        ),
+                        retryable=(
+                            planning_error.retryable
+                            if planning_error is not None
+                            else False
+                        ),
+                        category=(
+                            ErrorCategory.INTERNAL
+                            if planning_error is not None
+                            else ErrorCategory.VALIDATION
+                        ),
+                        details={
+                            "planning_status": result.status.value,
+                            "planning_request_id": result.planning_request_id,
+                        },
+                    ),
+                ),
             )
         policy = self._policies.build(
             result.validated_dag,
             admission.allocation.execution,
-            self._profile.execution,
+            self._execution_config_for_dag(result.validated_dag),
         )
         self._handoffs.prepare(
             state,
@@ -231,3 +296,55 @@ class WorkflowCoordinator:
         )
         self._handoffs.create_or_validate_checkpoint(state)
         return self._runs.load(state.run_id)
+
+    def _execution_config_for_dag(self, dag: TaskDAG):
+        """Bind existing uniform Phase 10 policy templates to validated task IDs."""
+
+        config = self._profile.execution
+        policies = tuple(sorted(config.task_policies, key=lambda item: item.task_id))
+        tasks = tuple(sorted(dag.tasks, key=lambda item: item.task_id))
+        if {item.task_id for item in policies} == {item.task_id for item in tasks}:
+            return config
+        # The planner is authoritative for accepted DAG cardinality.  Uniform
+        # configuration entries are templates, not a second cardinality limit.
+        # Materialization remains bounded by the immutable planning policy and
+        # preserves ExecutionPolicyBuilder's exact task-ID coverage check.
+        if not policies or len(tasks) > self._profile.planning_policy.max_tasks:
+            return config
+        template = policies[0]
+        if any(
+            item.model_dump(mode="python", exclude={"task_id"})
+            != template.model_dump(mode="python", exclude={"task_id"})
+            for item in policies[1:]
+        ):
+            return config
+        return config.model_copy(
+            update={
+                "task_policies": tuple(
+                    template.model_copy(update={"task_id": task.task_id})
+                    for task in tasks
+                )
+            }
+        )
+
+    def _planning_failure_error(
+        self,
+        state: RunState,
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+        category: ErrorCategory,
+        details: dict[str, object],
+    ) -> RunError:
+        """Project the planner's typed failure into the existing Run error authority."""
+
+        return RunError(
+            error_id=stable_id("err", [state.run_id, "planning", code, message]),
+            code=code,
+            category=category,
+            message=message,
+            retryable=retryable,
+            occurred_at=self._clock.now(),
+            details=details,
+        )

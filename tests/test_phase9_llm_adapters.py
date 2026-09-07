@@ -4,6 +4,7 @@ import asyncio
 import json
 import traceback
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from phase9_fixtures import (
@@ -40,15 +41,17 @@ from researchos.application.real_composition import (
     BoundRealModel,
     RealCompositionManager,
 )
+from researchos.application.real_workflow_runtime import RealAgent, RealWorkflowRuntime
 from researchos.application.run_manager import RunManager
 from researchos.configuration.real_settings import default_tavily_capability
 from researchos.configuration.validation import (
+    PHASE11_AGENT_RESPONSE_CONTRACT,
     deepseek_prompt_content_hash,
     deepseek_response_contract,
     deepseek_system_prompt,
 )
 from researchos.domain.agent import AgentContext, AgentDecisionKind, AgentRequest
-from researchos.domain.contracts import RunInput, RunStatus
+from researchos.domain.contracts import RunInput, RunStatus, TraceEventType
 from researchos.domain.planning import ExpectedOutput, ResearchTask
 from researchos.domain.runtime import (
     IdempotencyMode,
@@ -294,6 +297,27 @@ def _transport(
     ), sync, async_client
 
 
+def _phase11_web_bound(bound: BoundRealModel) -> BoundRealModel:
+    settings = bound.settings.model_copy(
+        update={
+            "response_contract_version": PHASE11_AGENT_RESPONSE_CONTRACT,
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                "agent",
+                enable_web_tools=True,
+                require_evidence_gap_for_web_search=True,
+            ),
+        }
+    )
+    return BoundRealModel(
+        run_id=bound.run_id,
+        run_config_hash=bound.run_config_hash,
+        composition_hash=bound.composition_hash,
+        settings=settings,
+        bundle=settings.bundle(),
+        credential=bound.credential,
+    )
+
+
 def test_planning_adapter_maps_one_strict_json_response() -> None:
     bound, transport, sync, _ = _transport("planning", {"candidate": "value"})
     model = DeepSeekPlanningModel(bound, transport, AllowingAuthorizer())
@@ -354,6 +378,116 @@ def test_non_stop_finish_reason_is_terminal_failure_with_known_usage(
     assert caught.value.usage.tokens == 5
     assert caught.value.usage_certainty.value == "upper_bound"
     assert len(client.calls) == 1
+    diagnostics = caught.value.provider_diagnostics
+    assert diagnostics == {
+        "schema_version": "provider_diagnostics_v1",
+        "role_id": "planning",
+        "operation_id": None,
+        "dispatch_classification": "response_received",
+        "http_response_received": True,
+        "provider_finish_reason": finish_reason,
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "max_input_tokens": bound.settings.policy.max_input_tokens,
+        "max_output_tokens": bound.settings.policy.max_output_tokens,
+        "canonical_request_bytes": diagnostics["canonical_request_bytes"],
+        "error_code": expected_code,
+        "retryable": retryable,
+        "duration_milliseconds": diagnostics["duration_milliseconds"],
+    }
+    assert b"partial" not in json.dumps(diagnostics).encode()
+
+
+def test_agent_length_failure_persists_safe_provider_diagnostics_in_trace() -> None:
+    bound = _bound("agent")
+    body = _provider_envelope(
+        {"partial": "never persisted"},
+        model=bound.settings.model_id,
+        finish_reason="length",
+    )
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=DeepSeekAgent(
+            bound,
+            OpenAICompatibleChatTransport(
+                bound, sync_client=SyncClient(body), async_client=AsyncClient(body)
+            ),
+            AllowingAuthorizer(),
+        ),
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+    assert result.error is not None
+    assert result.error.code == "provider_response_incomplete"
+    event = next(
+        item
+        for item in trace.read("run_test")
+        if item.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = event.attributes["provider_diagnostics_v1"]
+    assert diagnostics["provider_finish_reason"] == "length"
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["canonical_request_bytes"] > 0
+    assert diagnostics["max_output_tokens"] == bound.settings.policy.max_output_tokens
+    assert diagnostics["input_tokens"] == 3
+    assert diagnostics["output_tokens"] == 2
+    serialized = event.model_dump_json()
+    assert "never persisted" not in serialized
+
+
+def test_real_agent_wrapper_preserves_length_diagnostics_in_trace() -> None:
+    """The Phase 11 runtime wrapper must not drop safe adapter diagnostics."""
+    bound = _bound("agent")
+    body = _provider_envelope(
+        {"partial": "never persisted"},
+        model=bound.settings.model_id,
+        finish_reason="length",
+    )
+    adapter = DeepSeekAgent(
+        bound,
+        OpenAICompatibleChatTransport(
+            bound, sync_client=SyncClient(body), async_client=AsyncClient(body)
+        ),
+        AllowingAuthorizer(),
+    )
+    runtime = RealWorkflowRuntime(
+        integrations=SimpleNamespace(agent=lambda _run_id: adapter),
+        agent_descriptor=adapter.descriptor,
+        tool_descriptors=(),
+        claim_budget=RuntimeResourceAmount(),
+    )
+    runtime._run_id = "run_test"
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=RealAgent(runtime),
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_incomplete"
+    event = next(
+        item
+        for item in trace.read("run_test")
+        if item.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = event.attributes["provider_diagnostics_v1"]
+    assert diagnostics["provider_finish_reason"] == "length"
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["canonical_request_bytes"] > 0
+    assert "never persisted" not in event.model_dump_json()
 
 
 def test_length_finish_reason_does_not_parse_partial_json_as_success() -> None:
@@ -951,6 +1085,284 @@ def test_malformed_agent_decision_preserves_upper_bound_provider_usage() -> None
     assert result.usage_certainty.value == "upper_bound"
 
 
+def test_phase11_agent_accepts_valid_final_response() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {"output_id": "answer", "media_type": "text/plain"}
+                ]
+            },
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            _phase11_web_bound(bound), transport, AllowingAuthorizer()
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.FINAL
+
+
+def test_phase11_agent_accepts_full_final_output_fields() -> None:
+    """Final-26: a FINAL outputs item may carry every schema-defined field."""
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {
+                        "output_id": "answer",
+                        "media_type": "text/plain",
+                        "artifact_ids": ["artifact_one"],
+                        "value_hash": "a" * 64,
+                    }
+                ]
+            },
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            _phase11_web_bound(bound), transport, AllowingAuthorizer()
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.FINAL
+    assert result.final.outputs[0].output_id == "answer"
+    assert result.final.outputs[0].artifact_ids == ("artifact_one",)
+    assert result.final.outputs[0].value_hash == "a" * 64
+
+
+@pytest.mark.parametrize(
+    "extra_key",
+    ["content", "answer", "summary", "value", "zz_unknown"],
+)
+def test_phase11_agent_rejects_extra_final_output_field(extra_key: str) -> None:
+    """Final-26: any unknown field on a final.outputs item fails closed."""
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {
+                        "output_id": "answer",
+                        "media_type": "text/plain",
+                        extra_key: "provider-supplied prose",
+                    }
+                ]
+            },
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(
+        _phase11_web_bound(bound), transport, AllowingAuthorizer()
+    )
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=agent,
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_invalid"
+    decision = next(
+        event
+        for event in trace.read("run_test")
+        if event.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = decision.attributes["provider_diagnostics_v1"]
+    assert diagnostics["error_code"] == "agent_response_contract_invalid"
+    assert diagnostics["agent_response_validation"]["errors"] == [
+        {
+            "category": "extra",
+            "branch": "final",
+            "loc": ["final", "final", "outputs"],
+        }
+    ]
+
+
+def test_phase11_agent_rejects_extra_field_on_final_envelope() -> None:
+    """Final-26: an extra field on the final object itself also fails closed."""
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {"output_id": "answer", "media_type": "text/plain"}
+                ],
+                "summary": "not a schema field",
+            },
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(
+        _phase11_web_bound(bound), transport, AllowingAuthorizer()
+    )
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=agent,
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_invalid"
+    decision = next(
+        event
+        for event in trace.read("run_test")
+        if event.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = decision.attributes["provider_diagnostics_v1"]
+    assert diagnostics["error_code"] == "agent_response_contract_invalid"
+    assert diagnostics["agent_response_validation"]["errors"] == [
+        {"category": "extra", "branch": "final", "loc": ["final", "final"]}
+    ]
+
+
+def test_phase11_agent_accepts_valid_tool_call_response() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "search_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 1},
+            },
+            "evidence_status": "insufficient",
+            "remaining_evidence_gap": "authoritative_source_missing",
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            _phase11_web_bound(bound), transport, AllowingAuthorizer()
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.TOOL_CALL
+
+
+def test_phase11_agent_missing_final_persists_safe_validation_diagnostic() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {"kind": "final"},
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(_phase11_web_bound(bound), transport, AllowingAuthorizer())
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=agent,
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_invalid"
+    decision = next(
+        event
+        for event in trace.read("run_test")
+        if event.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = decision.attributes["provider_diagnostics_v1"]
+    assert diagnostics["error_code"] == "agent_response_contract_invalid"
+    assert diagnostics["agent_response_validation"] == {
+        "schema_version": "agent_response_validation_v1",
+        "errors": [
+            {"category": "missing", "branch": "final", "loc": ["final", "final"]}
+        ],
+    }
+
+
+def test_phase11_agent_invalid_enum_persists_safe_validation_diagnostic() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "search_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 1},
+            },
+            "evidence_status": "insufficient",
+            "remaining_evidence_gap": "not_a_valid_gap",
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(_phase11_web_bound(bound), transport, AllowingAuthorizer())
+
+    result = asyncio.run(agent.decide(_agent_request(), Signal()))
+
+    assert result.kind is AgentDecisionKind.FAILED
+    diagnostics = agent.provider_diagnostics_for("agent_request")
+    assert diagnostics is not None
+    assert diagnostics["agent_response_validation"] == {
+        "schema_version": "agent_response_validation_v1",
+        "errors": [
+            {
+                "category": "enum",
+                "branch": "tool_call",
+                "loc": ["tool_call", "remaining_evidence_gap"],
+            }
+        ],
+    }
+
+
+def test_phase11_agent_rejects_mixed_final_and_tool_call_response() -> None:
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {"outputs": []},
+            "tool_call": {
+                "tool_call_id": "search_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 1},
+            },
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(_phase11_web_bound(bound), transport, AllowingAuthorizer())
+
+    result = asyncio.run(agent.decide(_agent_request(), Signal()))
+
+    assert result.kind is AgentDecisionKind.FAILED
+    diagnostics = agent.provider_diagnostics_for("agent_request")
+    assert diagnostics is not None
+    assert diagnostics["agent_response_validation"] == {
+        "schema_version": "agent_response_validation_v1",
+        "errors": [
+            {"category": "extra", "branch": "final", "loc": ["final", "tool_call"]}
+        ],
+    }
+
+
 def test_phase9b_agent_prompt_exposes_typed_tool_capabilities() -> None:
     prompt = deepseek_system_prompt("agent", enable_web_tools=True)
     assert '"tool_call"' in prompt
@@ -1024,6 +1436,106 @@ def test_phase9b_agent_accepts_typed_model_tool_call() -> None:
     )
     assert result.kind is AgentDecisionKind.TOOL_CALL
     assert result.tool_call.capability_id == "web_search"
+
+
+def test_web_agent_rejects_search_limit_above_bound_capability_before_tool() -> None:
+    bound, transport, _, async_client = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "call_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 6},
+            },
+            "usage": None,
+            "usage_certainty": "unknown",
+        },
+        web_tools=True,
+    )
+
+    dynamic_settings = bound.settings.model_copy(
+        update={
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                "agent", enable_web_tools=True, web_search_max_results=5
+            )
+        }
+    )
+    dynamic_bound = BoundRealModel(
+        run_id=bound.run_id,
+        run_config_hash=bound.run_config_hash,
+        composition_hash=bound.composition_hash,
+        settings=dynamic_settings,
+        bundle=dynamic_settings.bundle(),
+        credential=bound.credential,
+    )
+    agent = DeepSeekAgent(
+        dynamic_bound,
+        transport,
+        AllowingAuthorizer(),
+        web_search_max_results=5,
+    )
+    result = asyncio.run(agent.decide(_agent_request(), Signal()))
+
+    assert result.kind is AgentDecisionKind.FAILED
+    assert result.error.code == "provider_response_invalid"
+    diagnostics = agent.provider_diagnostics_for("agent_request")
+    assert diagnostics is not None
+    assert diagnostics["error_code"] == "web_search_limit_exceeded"
+    assert len(async_client.calls) == 1
+
+
+def test_web_agent_prompt_binds_tavily_limit_and_accepts_it() -> None:
+    prompt = deepseek_system_prompt(
+        "agent", enable_web_tools=True, web_search_max_results=5
+    )
+    prefix = prompt.split("\n", 1)[0] + "\nCanonical response schema:\n"
+    schema = json.loads(prompt.removeprefix(prefix))
+    assert schema["$defs"]["SearchRequest"]["properties"]["limit"] == {
+        "default": 5,
+        "maximum": 5,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer",
+    }
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "tool_call",
+            "tool_call": {
+                "tool_call_id": "call_one",
+                "capability_id": "web_search",
+                "input": {"input_type": "search", "query": "safe", "limit": 5},
+            },
+            "usage": None,
+            "usage_certainty": "unknown",
+        },
+        web_tools=True,
+    )
+    settings = bound.settings.model_copy(
+        update={
+            "prompt_content_hash": deepseek_prompt_content_hash(
+                "agent", enable_web_tools=True, web_search_max_results=5
+            )
+        }
+    )
+    dynamic_bound = BoundRealModel(
+        run_id=bound.run_id,
+        run_config_hash=bound.run_config_hash,
+        composition_hash=bound.composition_hash,
+        settings=settings,
+        bundle=settings.bundle(),
+        credential=bound.credential,
+    )
+    result = asyncio.run(
+        DeepSeekAgent(
+            dynamic_bound,
+            transport,
+            AllowingAuthorizer(),
+            web_search_max_results=5,
+        ).decide(_agent_request(), Signal())
+    )
+    assert result.kind is AgentDecisionKind.TOOL_CALL
 
 
 def test_phase9b_agent_rejects_non_web_model_tool_call() -> None:
@@ -1393,6 +1905,117 @@ def test_request_bound_is_checked_before_dispatch() -> None:
         transport.complete(({"role": "user", "content": "too large"},))
     assert caught.value.dispatched is False
     assert sync.calls == []
+
+
+def test_real_planning_prompt_pins_candidate_provenance_to_bound_model() -> None:
+    bound, transport, sync, _ = _transport("planning", {"candidate": "value"})
+    DeepSeekPlanningModel(
+        bound, transport, AllowingAuthorizer()
+    ).generate(planning_request(run_id="run_test"))
+
+    system = json.loads(sync.calls[0]["content"])["messages"][0]["content"]
+    assert (
+        f"planner_metadata.planning_model_id exactly to: {bound.settings.model_id}"
+        in system
+    )
+
+
+def test_phase11_input_admission_rejects_oversized_request_before_dispatch() -> None:
+    bound = _bound(
+        "planning",
+        policy_overrides={
+            "input_reservation_basis": "enforced_utf8_input_limit_v1",
+            "max_input_tokens": 1_024,
+        },
+    )
+    sync = SyncClient(_provider_envelope({"ok": True}))
+    transport = OpenAICompatibleChatTransport(
+        bound, sync_client=sync, async_client=AsyncClient(b"")
+    )
+    with pytest.raises(RealProviderFailure) as caught:
+        transport.complete(({"role": "user", "content": "x" * 2_000},))
+    assert caught.value.code == "provider_input_token_limit_exceeded"
+    assert caught.value.diagnostic is ProviderDispatchDiagnostic.NOT_DISPATCHED
+    assert caught.value.dispatched is False
+    assert sync.calls == []
+
+
+def test_phase11_input_admission_allows_under_limit_request_to_dispatch() -> None:
+    bound = _bound(
+        "planning",
+        policy_overrides={
+            "input_reservation_basis": "enforced_utf8_input_limit_v1",
+            "max_input_tokens": 1_024,
+        },
+    )
+    body = _provider_envelope(
+        {"ok": True},
+        model=bound.settings.model_id,
+        prompt_tokens=10,
+        completion_tokens=2,
+        total_tokens=12,
+    )
+    sync = SyncClient(body)
+    response = OpenAICompatibleChatTransport(
+        bound, sync_client=sync, async_client=AsyncClient(body)
+    ).complete(({"role": "user", "content": "safe"},))
+    assert response.diagnostic is ProviderDispatchDiagnostic.RESPONSE_RECEIVED
+
+
+@pytest.mark.parametrize(
+    "role", ("planning", "agent")
+)
+def test_openai_transport_persists_safe_response_diagnostics_for_every_role(
+    role: str,
+) -> None:
+    bound, transport, sync, _ = _transport(role, {"candidate": "value"})
+    response = transport.complete(
+        ({"role": "user", "content": "prompt-body-must-not-persist"},),
+        operation_id="operation_test",
+    )
+    diagnostics = response.provider_diagnostics
+    assert diagnostics["schema_version"] == "provider_diagnostics_v1"
+    assert diagnostics["role_id"] == role
+    assert diagnostics["operation_id"] == "operation_test"
+    assert diagnostics["dispatch_classification"] == "response_received"
+    assert diagnostics["http_response_received"] is True
+    assert diagnostics["provider_finish_reason"] == "stop"
+    assert diagnostics["input_tokens"] == 3
+    assert diagnostics["output_tokens"] == 2
+    assert diagnostics["total_tokens"] == 5
+    assert diagnostics["max_input_tokens"] == bound.settings.policy.max_input_tokens
+    assert diagnostics["max_output_tokens"] == bound.settings.policy.max_output_tokens
+    assert diagnostics["canonical_request_bytes"] > 0
+    assert "prompt-body-must-not-persist" not in json.dumps(diagnostics)
+    assert len(sync.calls) == 1
+
+
+def test_missing_provider_usage_stays_unavailable_in_diagnostics() -> None:
+    bound = _bound("planning")
+    raw = json.dumps(
+        {
+            "model": bound.settings.model_id,
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": "RAW_COMPLETION_SENTINEL"},
+                }
+            ],
+        }
+    ).encode()
+    with pytest.raises(RealProviderFailure) as caught:
+        OpenAICompatibleChatTransport(
+            bound, sync_client=SyncClient(raw), async_client=AsyncClient(raw)
+        ).complete(({"role": "user", "content": "PROMPT_SENTINEL"},))
+    assert caught.value.code == "provider_response_invalid"
+    assert caught.value.usage is None
+    diagnostics = caught.value.provider_diagnostics
+    assert diagnostics is not None
+    assert diagnostics["input_tokens"] is None
+    assert diagnostics["output_tokens"] is None
+    assert diagnostics["total_tokens"] is None
+    assert "PROMPT_SENTINEL" not in json.dumps(diagnostics)
+    assert "RAW_COMPLETION_SENTINEL" not in json.dumps(diagnostics)
 
 
 def test_response_bound_streaming_rejects_without_retry() -> None:
