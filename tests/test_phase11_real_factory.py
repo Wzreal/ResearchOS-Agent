@@ -379,6 +379,7 @@ def test_legacy_planning_settings_do_not_gain_phase11_total_timeout() -> None:
     assert planning.policy.provider_call_reservation.input_tokens == 1_000_000
 
 
+@pytest.mark.requires_real_extra
 def test_phase11_real_evaluating_fresh_process_rebind_reuses_evaluation_without_resumed_trace(  # noqa: E501
     tmp_path,
 ) -> None:
