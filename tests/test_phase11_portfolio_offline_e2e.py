@@ -269,6 +269,101 @@ def _bundle(settings):
     )
 
 
+def _final25_profile(settings):
+    """A bounded five-task profile that permits the final-25 trajectory."""
+
+    profile = _portfolio_profile(settings)
+    provider = settings.model_for_role("planning").policy.provider_call_reservation
+    tavily_cost = (
+        settings.capability_for_id("web_search").provider_reservation.cost_microunits
+    )
+    allocation = WorkflowBudgetAllocation(
+        total=RuntimeResourceAmount(
+            duration_milliseconds=5_340_000,
+            tokens=provider.total_tokens * 26,
+            cost_microunits=provider.cost_microunits * 26 + tavily_cost * 15,
+            tool_calls=41,
+        ),
+        planning=RuntimeResourceAmount(
+            duration_milliseconds=90_000,
+            tokens=provider.total_tokens,
+            cost_microunits=provider.cost_microunits,
+            tool_calls=1,
+        ),
+        execution=RuntimeResourceAmount(
+            duration_milliseconds=4_800_000,
+            tokens=provider.total_tokens * 20,
+            cost_microunits=provider.cost_microunits * 20 + tavily_cost * 15,
+            tool_calls=35,
+        ),
+        claim_extraction=RuntimeResourceAmount(
+            duration_milliseconds=90_000,
+            tokens=provider.total_tokens,
+            cost_microunits=provider.cost_microunits,
+            tool_calls=1,
+        ),
+        verification=RuntimeResourceAmount(
+            duration_milliseconds=360_000,
+            tokens=provider.total_tokens * 4,
+            cost_microunits=provider.cost_microunits * 4,
+            tool_calls=4,
+        ),
+    )
+    template = profile.execution.task_policies[0].model_copy(
+        update={
+            "timeout_milliseconds": 960_000,
+            "reservation": RuntimeResourceAmount(
+                duration_milliseconds=960_000,
+                tokens=provider.total_tokens * 4,
+                cost_microunits=provider.cost_microunits * 4 + tavily_cost * 3,
+                tool_calls=7,
+            ),
+        }
+    )
+    return profile.model_copy(
+        update={
+            "profile_id": "phase11_final25_tool_budget",
+            "profile_version": "1",
+            "budget": profile.budget.model_copy(
+                update={
+                    "profile_id": "phase11_final25_tool_budget_allocation",
+                    "profile_version": "1",
+                    "allocation": allocation,
+                }
+            ),
+            "execution": profile.execution.model_copy(
+                update={
+                    "task_policies": tuple(
+                        template.model_copy(update={"task_id": task_id})
+                        for task_id in ("task_a", "task_b", "task_c")
+                    )
+                }
+            ),
+        }
+    )
+
+
+def _final25_bundle(settings):
+    profile = _final25_profile(settings)
+    return Phase11RealBenchmarkBundleV1(
+        bundle_id="phase11_final25_tool_budget",
+        bundle_version="1",
+        workflow_profile=profile,
+        benchmark=build_phase11_real_benchmark_v1(),
+        evaluation_policy=phase11_evaluation_policy(profile),
+        real_settings_hash=model_sha256(settings),
+        capability_ids=tuple(
+            item.capability_id for item in settings.capability_settings
+        ),
+        approved_refs=("feat/phase-11-real-evaluation",),
+        max_agent_steps=4,
+        max_agent_tool_calls=3,
+        system_commit_sha=profile.system_commit_sha,
+        system_version=profile.system_version,
+        max_batch_cost_microunits=50_000_000,
+    )
+
+
 class _FakePlanning:
     def __init__(self, meter: _RequestMeter) -> None:
         self._meter = meter
@@ -380,6 +475,57 @@ class _FakeAgent:
         )
 
 
+class _Final25FakeAgent(_FakeAgent):
+    """Models the bounded terminal behavior required after the third tool."""
+
+    async def decide(self, request, _cancellation):
+        self.requests.append(request)
+        self._meter.record("agent", request)
+        task_id = request.context.task_id
+        step = request.agent_step
+        if task_id == "task_1" and step in (1, 2):
+            capability_id = "web_search"
+        elif task_id == "task_1" and step == 3:
+            capability_id = "web_browser"
+        elif task_id == "task_2" and step == 1:
+            capability_id = "web_search"
+        elif task_id == "task_2" and step == 2:
+            capability_id = "web_browser"
+        elif task_id not in {"task_1", "task_2"} and step == 1:
+            capability_id = "web_search"
+        elif task_id not in {"task_1", "task_2"} and step == 2:
+            capability_id = "web_browser"
+        else:
+            output = request.context.expected_outputs[0]
+            return AgentFinalDecision(
+                final=AgentFinalResult(
+                    outputs=(
+                        AgentProducedOutput(
+                            output_id=output.output_id,
+                            media_type=output.media_type,
+                        ),
+                    )
+                ),
+                usage=RuntimeResourceAmount(),
+                usage_certainty=UsageCertainty.EXACT,
+            )
+        tool_call_id = f"{task_id}_{capability_id}_{step}"
+        tool_input = (
+            SearchRequest(query=request.context.task.objective)
+            if capability_id == "web_search"
+            else BrowserRequest(url="https://example.test/source")
+        )
+        return AgentToolDecision(
+            tool_call=AgentToolCall(
+                tool_call_id=tool_call_id,
+                capability_id=capability_id,
+                input=tool_input,
+            ),
+            usage=RuntimeResourceAmount(),
+            usage_certainty=UsageCertainty.EXACT,
+        )
+
+
 class _FakeWebSearch:
     def __init__(self, descriptor, reservation) -> None:
         self.descriptor = descriptor
@@ -475,10 +621,16 @@ class _FakeVerification:
 
 class _FakeIntegrations:
     def __init__(
-        self, settings, meter: _RequestMeter, *, use_browser: bool = True
+        self,
+        settings,
+        meter: _RequestMeter,
+        *,
+        use_browser: bool = True,
+        final25_style: bool = False,
     ) -> None:
         self.planning = _FakePlanning(meter)
-        self.agent_adapter = _FakeAgent(
+        agent_type = _Final25FakeAgent if final25_style else _FakeAgent
+        self.agent_adapter = agent_type(
             settings.model_for_role("agent").suboperation_reservation(),
             meter,
             use_browser=use_browser,
@@ -643,6 +795,84 @@ def test_phase11_portfolio_real_composition_completes_offline_dynamic_five_task_
         * 21
     )
     assert persisted.budget.usage.tool_calls <= 31
+
+
+def test_phase11_final25_style_tool_budget_completes_without_fourth_tool(
+    tmp_path,
+) -> None:
+    settings = _settings(32_768, 8_192)
+    bundle = _final25_bundle(settings)
+    factory = WorkflowFactory(tmp_path)
+    coordinator = factory.build_real(
+        bundle=bundle,
+        settings=settings,
+        secrets=EnvironmentSecretSource(
+            {
+                "researchos_deepseek_api_key": "offline-test-secret",
+                "researchos_tavily_api_key": "offline-test-secret",
+            }
+        ),
+    )
+    runtime = coordinator._runtime_binder.__self__
+    fake = _FakeIntegrations(settings, _RequestMeter(), final25_style=True)
+    runtime._integrations = fake
+    case = next(
+        item
+        for item in bundle.benchmark.cases
+        if item.case_id == "p11_citation_chain"
+    )
+
+    state = asyncio.run(
+        coordinator.create_and_execute(
+            RunInput(query=case.query), phase11_real_run_config(bundle, settings)
+        )
+    )
+    evaluation = asyncio.run(
+        factory.evaluate_phase11(
+            bundle=bundle,
+            run_id=state.run_id,
+            case_id=case.case_id,
+            cancellation=coordinator._cancellation,
+        )
+    )
+
+    assert state.status is RunStatus.COMPLETED
+    assert evaluation.eval_run_id
+    task_tool_counts = Counter(
+        invocation.invocation.task_id
+        for invocation in (*fake.search.invocations, *fake.browser.invocations)
+    )
+    assert task_tool_counts["task_1"] == 3
+    assert task_tool_counts["task_2"] == 2
+    assert all(count <= 3 for count in task_tool_counts.values())
+
+    requests_by_task = {}
+    for request in fake.agent_adapter.requests:
+        requests_by_task.setdefault(request.context.task_id, []).append(request)
+    assert [
+        item.tool_call_budget.remaining_tool_calls
+        for item in requests_by_task["task_1"]
+    ] == [3, 2, 1, 0]
+    assert [
+        item.tool_call_budget.remaining_tool_calls
+        for item in requests_by_task["task_2"]
+    ] == [3, 2, 1]
+    assert all(
+        request.tool_call_budget is not None
+        and request.tool_call_budget.max_tool_calls == 3
+        for requests in requests_by_task.values()
+        for request in requests
+    )
+    trace = FilesystemTraceSink(tmp_path).read(state.run_id)
+    budget_projections = [
+        item.attributes["tool_call_budget"]
+        for item in trace
+        if item.event_type is TraceEventType.AGENT_DECISION
+    ]
+    assert {item["max_tool_calls"] for item in budget_projections} == {3}
+    assert FilesystemEvidenceStore(tmp_path).load(state.run_id).evidence
+    graph = FilesystemClaimGraphStore(tmp_path).load(state.run_id)
+    assert graph.claims and graph.edges
 
 
 def test_phase11_search_metadata_without_browser_evidence_finalizes_partial(

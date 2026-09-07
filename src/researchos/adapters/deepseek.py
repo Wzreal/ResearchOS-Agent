@@ -119,6 +119,10 @@ def _messages(
     # per-task limit is not selected.
     if role_id == "planning" and payload.get("per_task_tool_call_limit") is None:
         payload.pop("per_task_tool_call_limit", None)
+    # Preserve Phase 1-10 Agent request bytes unless Phase 11 runtime selected
+    # the explicit tool-budget projection.
+    if role_id == "agent" and payload.get("tool_call_budget") is None:
+        payload.pop("tool_call_budget", None)
     content = json.dumps(
         payload,
         ensure_ascii=False,

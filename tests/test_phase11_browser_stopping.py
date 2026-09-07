@@ -26,9 +26,12 @@ from datetime import UTC, datetime, timedelta
 from researchos.adapters.memory import InMemoryTraceSink
 from researchos.application.agent_runner import AgentRunner, AgentRunnerPolicy
 from researchos.application.capability_registry import CapabilityRegistry
+from researchos.configuration.validation import deepseek_system_prompt
 from researchos.domain.agent import (
     AgentContext,
     AgentDescriptor,
+    AgentError,
+    AgentFailedDecision,
     AgentFinalDecision,
     AgentFinalResult,
     AgentRequest,
@@ -362,6 +365,52 @@ class SearchThenBrowserThenFinalAgent(SearchThenFinalAgent):
         return self._final_decision()
 
 
+class ThreeToolsThenTerminalAgent(StoppingAgent):
+    """Final-25 shape: two searches, one browser, then a terminal decision."""
+
+    def __init__(self, terminal: str) -> None:
+        super().__init__("final25")
+        self._terminal = terminal
+
+    @staticmethod
+    def _search_decision(index: int) -> Phase11RealWebAgentToolDecision:
+        return Phase11RealWebAgentToolDecision(
+            tool_call=RealWebAgentToolCall(
+                tool_call_id=f"search_{index}",
+                capability_id="web_search",
+                input=SearchRequest(query=f"authoritative source {index}"),
+            ),
+            evidence_status="insufficient",
+            remaining_evidence_gap=(
+                EvidenceGapCategory.AUTHORITATIVE_SOURCE_MISSING
+            ),
+            usage=RuntimeResourceAmount(),
+            usage_certainty=UsageCertainty.EXACT,
+        )
+
+    async def decide(self, request: AgentRequest, cancellation):
+        del cancellation
+        self.calls += 1
+        self.requests.append(request)
+        if len(request.observations) < 2:
+            return self._search_decision(len(request.observations) + 1)
+        if len(request.observations) == 2:
+            return self._browser_decision(_AUTHORITATIVE_URL)
+        if self._terminal == "tool_call":
+            return self._search_decision(4)
+        if self._terminal == "failed":
+            return AgentFailedDecision(
+                error=AgentError(
+                    code="evidence_insufficient",
+                    message="bounded evidence gap remains after tool budget exhaustion",
+                ),
+                usage=RuntimeResourceAmount(),
+                usage_certainty=UsageCertainty.EXACT,
+            )
+        assert self._terminal == "final"
+        return self._final_decision()
+
+
 def _context(*, tool_calls: int, capabilities=("web_browser",)) -> AgentContext:
     task = ResearchTask(
         task_id="task_browse_authority",
@@ -405,6 +454,7 @@ def _run(agent: StoppingAgent, tools: tuple[object, ...], context: AgentContext)
                 max_agent_steps=5,
                 max_tool_calls=3,
                 require_source_evidence_before_final=True,
+                expose_tool_call_budget=True,
             ),
             clock=Clock(),
             sleeper=Sleeper(),
@@ -454,6 +504,13 @@ def test_case_c_pathological_repeats_fail_closed_on_hard_tool_limit() -> None:
     assert len(tool.calls) == 3
     # The safety guard fired without raising max_agent_tool_calls or steps.
     assert agent.calls == 4
+    assert [
+        (
+            item.tool_call_budget.tool_calls_used,
+            item.tool_call_budget.remaining_tool_calls,
+        )
+        for item in agent.requests
+    ] == [(0, 3), (1, 2), (2, 1), (3, 0)]
 
 
 def test_search_metadata_cannot_complete_browser_authorized_task() -> None:
@@ -489,6 +546,8 @@ def test_search_then_browser_source_evidence_allows_final() -> None:
     assert len(search.calls) == 1
     assert len(browser.calls) == 1
     assert agent.calls == 3
+    assert agent.requests[-1].tool_call_budget is not None
+    assert agent.requests[-1].tool_call_budget.remaining_tool_calls == 1
 
 
 def test_search_then_browser_404_does_not_become_source_evidence() -> None:
@@ -509,3 +568,73 @@ def test_search_then_browser_404_does_not_become_source_evidence() -> None:
     assert len(browser.calls) == 1
     assert len(result.observations) == 2
     assert result.observations[-1].result.error.code == "browser_http_not_found"
+
+
+def test_phase11_prompt_explains_remaining_tool_budget_terminal_rule() -> None:
+    prompt = deepseek_system_prompt(
+        "agent",
+        enable_web_tools=True,
+        require_evidence_gap_for_web_search=True,
+    )
+    assert "tool_call_budget" in prompt
+    assert "remaining_tool_calls is zero" in prompt
+    assert "never return tool_call" in prompt
+
+
+def test_final25_exhausted_budget_tool_call_is_not_dispatched() -> None:
+    agent = ThreeToolsThenTerminalAgent("tool_call")
+    search = SearchMetadataFakeTool()
+    browser = BrowserFakeTool()
+    result = _run(
+        agent,
+        (search, browser),
+        _context(tool_calls=3, capabilities=("web_browser", "web_search")),
+    )
+
+    assert result.status.value == "failed"
+    assert result.error is not None
+    assert result.error.code == "agent_tool_call_limit_exceeded"
+    assert len(search.calls) == 2
+    assert len(browser.calls) == 1
+    assert len(search.calls) + len(browser.calls) == 3
+    assert agent.requests[-1].tool_call_budget is not None
+    assert agent.requests[-1].tool_call_budget.remaining_tool_calls == 0
+
+
+def test_final25_exhausted_budget_with_source_evidence_finalizes() -> None:
+    agent = ThreeToolsThenTerminalAgent("final")
+    search = SearchMetadataFakeTool()
+    browser = BrowserFakeTool()
+    result = _run(
+        agent,
+        (search, browser),
+        _context(tool_calls=3, capabilities=("web_browser", "web_search")),
+    )
+
+    assert result.status.value == "succeeded"
+    assert len(search.calls) == 2
+    assert len(browser.calls) == 1
+    assert agent.requests[2].tool_call_budget is not None
+    assert agent.requests[2].tool_call_budget.remaining_tool_calls == 1
+    assert agent.requests[-1].tool_call_budget is not None
+    assert agent.requests[-1].tool_call_budget.remaining_tool_calls == 0
+
+
+def test_final25_exhausted_budget_without_evidence_fails_terminally() -> None:
+    agent = ThreeToolsThenTerminalAgent("failed")
+    search = SearchMetadataFakeTool()
+    browser = NotFoundBrowserFakeTool()
+    result = _run(
+        agent,
+        (search, browser),
+        _context(tool_calls=3, capabilities=("web_browser", "web_search")),
+    )
+
+    assert result.status.value == "failed"
+    assert result.error is not None
+    assert result.error.code == "evidence_insufficient"
+    assert len(search.calls) == 2
+    assert len(browser.calls) == 1
+    assert browser.calls[0].invocation.input.url == _AUTHORITATIVE_URL
+    assert agent.requests[-1].tool_call_budget is not None
+    assert agent.requests[-1].tool_call_budget.remaining_tool_calls == 0

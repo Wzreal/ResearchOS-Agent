@@ -209,7 +209,12 @@ def deepseek_system_prompt(
             "not source evidence: when the task authorizes web_browser, do not "
             "return FINAL until a successful browser fetch or source excerpt is "
             "in the observations. A rejected or unavailable fetch is not by "
-            "itself an unresolved evidence gap."
+            "itself an unresolved evidence gap. The Agent request includes a "
+            "host-owned tool_call_budget with tool_calls_used, max_tool_calls, "
+            "and remaining_tool_calls. This is the exact current runtime state, "
+            "not a suggestion. When remaining_tool_calls is zero, return only a "
+            "final decision when the available evidence is sufficient or a failed "
+            "decision when it is not; never return tool_call."
         )
     return (
         f"{prompt}{capability_instruction}{stopping_instruction}\n"

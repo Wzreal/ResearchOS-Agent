@@ -28,6 +28,7 @@ from researchos.domain.agent import (
     AgentExecutionStatus,
     AgentObservation,
     AgentRequest,
+    AgentToolCallBudget,
 )
 from researchos.domain.contracts import (
     TraceEvent,
@@ -85,6 +86,9 @@ class AgentRunnerPolicy(BaseModel):
     # Phase 11 REAL opt-in: search metadata can discover a source but cannot
     # complete a task that explicitly requires a browser-fetched source body.
     require_source_evidence_before_final: bool = False
+    # Phase 11 REAL opt-in: disclose the existing hard tool-call authority to
+    # the model as read-only request state before every decision.
+    expose_tool_call_budget: bool = False
 
 
 class _UsageAccumulator:
@@ -220,6 +224,17 @@ class AgentRunner:
                 context=context,
                 agent_step=step,
                 observations=tuple(observations),
+                tool_call_budget=(
+                    AgentToolCallBudget(
+                        tool_calls_used=usage.amount.tool_calls,
+                        max_tool_calls=effective_tool_limit,
+                        remaining_tool_calls=(
+                            effective_tool_limit - usage.amount.tool_calls
+                        ),
+                    )
+                    if self._policy.expose_tool_call_budget
+                    else None
+                ),
             )
             outcome, value = await self._await_bounded(
                 self._agent.decide(request, cancellation),
@@ -288,6 +303,15 @@ class AgentRunner:
                         "kind": decision.kind.value,
                         "provider_diagnostics_v1": self._provider_diagnostics(
                             request.request_id
+                        ),
+                        **(
+                            {
+                                "tool_call_budget": request.tool_call_budget.model_dump(
+                                    mode="json"
+                                )
+                            }
+                            if request.tool_call_budget is not None
+                            else {}
                         ),
                     },
                 )
