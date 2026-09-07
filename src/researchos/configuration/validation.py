@@ -190,6 +190,7 @@ def deepseek_system_prompt(
             "the requested max_tasks."
         )
     stopping_instruction = ""
+    final_output_instruction = ""
     if require_evidence_gap_for_web_search:
         if role_id != "agent" or not enable_web_tools:
             raise ValueError("evidence-gap rule is valid only for web-enabled Agent")
@@ -216,8 +217,22 @@ def deepseek_system_prompt(
             "final decision when the available evidence is sufficient or a failed "
             "decision when it is not; never return tool_call."
         )
+        final_output_instruction = (
+            " When returning FINAL, each item in final.outputs is a "
+            "metadata/reference object only. It MUST contain only fields "
+            "defined by the AgentProducedOutput JSON schema: output_id, "
+            "media_type, artifact_ids, value_hash. Do not add any other keys. "
+            "Do not place answer prose, summaries, source text, evidence "
+            "excerpts, descriptions, citations, or arbitrary content/value "
+            "fields inside final.outputs. Do not repeat fetched source bodies "
+            "or evidence text in final.outputs. The evidence and source "
+            "material is already persisted by the runtime; FINAL should remain "
+            "a compact schema-valid output envelope. Use only schema-defined "
+            "fields; if an optional schema field is unnecessary, omit it."
+        )
     return (
-        f"{prompt}{capability_instruction}{stopping_instruction}\n"
+        f"{prompt}{capability_instruction}{stopping_instruction}"
+        f"{final_output_instruction}\n"
         "Canonical response schema:\n"
         f"{canonical_schema}"
     )

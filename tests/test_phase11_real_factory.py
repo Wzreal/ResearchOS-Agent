@@ -158,6 +158,35 @@ def test_phase11_web_search_requires_bounded_evidence_gap_before_dispatch() -> N
     assert admitted.evidence_status == "insufficient"
 
 
+def test_phase11_agent_prompt_constrains_final_outputs_to_schema_fields() -> None:
+    """Final-26: the Phase 11 prompt tells the model that final.outputs is
+    a metadata-only envelope with only schema-defined fields."""
+    phase11_prompt = deepseek_system_prompt(
+        "agent",
+        enable_web_tools=True,
+        web_search_max_results=5,
+        require_evidence_gap_for_web_search=True,
+    )
+    assert "each item in final.outputs is a metadata/reference object only" in (
+        phase11_prompt
+    )
+    assert "output_id, media_type, artifact_ids, value_hash" in phase11_prompt
+    assert "Do not add any other keys" in phase11_prompt
+    assert "Do not place answer prose" in phase11_prompt
+    assert "Do not repeat fetched source bodies" in phase11_prompt
+    assert "compact schema-valid output envelope" in phase11_prompt
+
+    legacy_prompt = deepseek_system_prompt(
+        "agent",
+        enable_web_tools=True,
+        web_search_max_results=5,
+        require_evidence_gap_for_web_search=False,
+    )
+    assert "each item in final.outputs is a metadata/reference object only" not in (
+        legacy_prompt
+    )
+
+
 def test_phase11_browser_stage_is_bound_by_the_evidence_gap_contract() -> None:
     """The v4 contract governs web_browser like web_search (final-19 gap)."""
     legacy_prompt = deepseek_system_prompt(

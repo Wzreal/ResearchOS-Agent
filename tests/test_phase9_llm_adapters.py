@@ -1108,6 +1108,137 @@ def test_phase11_agent_accepts_valid_final_response() -> None:
     assert result.kind is AgentDecisionKind.FINAL
 
 
+def test_phase11_agent_accepts_full_final_output_fields() -> None:
+    """Final-26: a FINAL outputs item may carry every schema-defined field."""
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {
+                        "output_id": "answer",
+                        "media_type": "text/plain",
+                        "artifact_ids": ["artifact_one"],
+                        "value_hash": "a" * 64,
+                    }
+                ]
+            },
+        },
+        web_tools=True,
+    )
+
+    result = asyncio.run(
+        DeepSeekAgent(
+            _phase11_web_bound(bound), transport, AllowingAuthorizer()
+        ).decide(_agent_request(), Signal())
+    )
+
+    assert result.kind is AgentDecisionKind.FINAL
+    assert result.final.outputs[0].output_id == "answer"
+    assert result.final.outputs[0].artifact_ids == ("artifact_one",)
+    assert result.final.outputs[0].value_hash == "a" * 64
+
+
+@pytest.mark.parametrize(
+    "extra_key",
+    ["content", "answer", "summary", "value", "zz_unknown"],
+)
+def test_phase11_agent_rejects_extra_final_output_field(extra_key: str) -> None:
+    """Final-26: any unknown field on a final.outputs item fails closed."""
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {
+                        "output_id": "answer",
+                        "media_type": "text/plain",
+                        extra_key: "provider-supplied prose",
+                    }
+                ]
+            },
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(
+        _phase11_web_bound(bound), transport, AllowingAuthorizer()
+    )
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=agent,
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_invalid"
+    decision = next(
+        event
+        for event in trace.read("run_test")
+        if event.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = decision.attributes["provider_diagnostics_v1"]
+    assert diagnostics["error_code"] == "agent_response_contract_invalid"
+    assert diagnostics["agent_response_validation"]["errors"] == [
+        {
+            "category": "extra",
+            "branch": "final",
+            "loc": ["final", "final", "outputs"],
+        }
+    ]
+
+
+def test_phase11_agent_rejects_extra_field_on_final_envelope() -> None:
+    """Final-26: an extra field on the final object itself also fails closed."""
+    bound, transport, _, _ = _transport(
+        "agent",
+        {
+            "kind": "final",
+            "final": {
+                "outputs": [
+                    {"output_id": "answer", "media_type": "text/plain"}
+                ],
+                "summary": "not a schema field",
+            },
+        },
+        web_tools=True,
+    )
+    agent = DeepSeekAgent(
+        _phase11_web_bound(bound), transport, AllowingAuthorizer()
+    )
+    trace = InMemoryTraceSink()
+    runner = AgentRunner(
+        agent=agent,
+        registry=CapabilityRegistry(allowed_modes=frozenset({AdapterMode.REAL})),
+        policy=AgentRunnerPolicy(max_agent_steps=1, max_tool_calls=0),
+        clock=SystemClock(),
+        sleeper=NeverSleeper(),
+        trace_sink=trace,
+    )
+
+    result = asyncio.run(runner.run(_agent_request().context, Signal()))
+
+    assert result.error is not None
+    assert result.error.code == "provider_response_invalid"
+    decision = next(
+        event
+        for event in trace.read("run_test")
+        if event.event_type is TraceEventType.AGENT_DECISION
+    )
+    diagnostics = decision.attributes["provider_diagnostics_v1"]
+    assert diagnostics["error_code"] == "agent_response_contract_invalid"
+    assert diagnostics["agent_response_validation"]["errors"] == [
+        {"category": "extra", "branch": "final", "loc": ["final", "final"]}
+    ]
+
+
 def test_phase11_agent_accepts_valid_tool_call_response() -> None:
     bound, transport, _, _ = _transport(
         "agent",
